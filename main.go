@@ -523,7 +523,7 @@ func initDB() error {
 		return joinErrors("failed to drop table folders", err)
 	}
 
-	_, err = db.Exec("CREATE TABLE message_to_folder (folder_name text, email_id text)")
+	_, err = db.Exec("CREATE TABLE message_to_folder (folder_name text, email_id text, primary key (folder_name, email_id))")
 	if err != nil {
 		return joinErrors("failed to create message_to_folder table", err)
 	}
@@ -597,7 +597,10 @@ func addToDB(emails []Email) error {
 
 	insertFolderStmnt, err := db.Prepare(`
 		INSERT INTO message_to_folder (folder_name, email_id)
-		VALUES (?, ?)`)
+		VALUES (?, ?)
+		ON CONFLICT (folder_name, email_id) DO NOTHING
+		`)
+
 	if err != nil {
 		return joinErrors("failed to prepare insert statement", err)
 	}
@@ -609,6 +612,9 @@ func addToDB(emails []Email) error {
 			return joinErrors("failed to insert email", err)
 		}
 		_, err = insertFolderStmnt.Exec(email.Mailbox, email.OurID)
+		if err != nil {
+			return joinErrors("failed to insert folder", err)
+		}
 	}
 
 	return nil
