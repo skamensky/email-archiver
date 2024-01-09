@@ -61,7 +61,8 @@ type Options struct {
 	ImapServer        string
 	StrictMailParsing bool
 	// WARNING: setting DEBUG to true creates a huge debug.txt file
-	Debug bool
+	Debug         bool
+	SkipMailboxes []string
 }
 
 type Client struct {
@@ -126,6 +127,9 @@ func setupOptions() (*Options, error) {
 			options.StrictMailParsing, _ = strconv.ParseBool(value)
 		case "DEBUG":
 			options.Debug, _ = strconv.ParseBool(value)
+		case "SKIP_MAILBOXES":
+			// we use a % as a delimiter because it's not a valid character in most iamp server setup
+			options.SkipMailboxes = strings.Split(value, "%")
 		}
 	}
 
@@ -136,7 +140,7 @@ func setupOptions() (*Options, error) {
 		return nil, errors.New("missing PASSWORD")
 	}
 	if options.ImapServer == "" {
-		return nil, errors.New("missing IMAPSERVER")
+		return nil, errors.New("missing IMAP_SERVER")
 	}
 
 	return options, nil
@@ -168,7 +172,7 @@ func setupImapClient(options *Options) (*Client, error) {
 
 }
 
-func downloadEachMailBox(imapClient *Client) error {
+func downloadEachMailbox(imapClient *Client) error {
 	mailboxes := make(chan *imap.MailboxInfo)
 	doneMailboxList := make(chan error, 1)
 	go func() {
@@ -176,7 +180,6 @@ func downloadEachMailBox(imapClient *Client) error {
 	}()
 
 	mailboxNames := []string{}
-	skip := []string{"[Gmail]/All Mail", "[Gmail]/Important"}
 	// we need to close the mailbox channel before we can select a mailbox, so we extract the mailbox names first
 	for m := range mailboxes {
 		toUse := true
@@ -185,15 +188,14 @@ func downloadEachMailBox(imapClient *Client) error {
 				toUse = false
 			}
 		}
-		for _, v := range skip {
+		for _, v := range imapClient.Options.SkipMailboxes {
 			if v == m.Name {
 				toUse = false
 			}
 		}
-		if !toUse {
-			continue
+		if toUse {
+			mailboxNames = append(mailboxNames, m.Name)
 		}
-		mailboxNames = append(mailboxNames, m.Name)
 	}
 
 	if err := <-doneMailboxList; err != nil {
@@ -214,7 +216,7 @@ func main() {
 	imapClient := setup()
 	defer imapClient.Logout()
 
-	if err := downloadEachMailBox(imapClient); err != nil {
+	if err := downloadEachMailbox(imapClient); err != nil {
 		log.Fatal("failed to download each mailbox", err)
 	}
 	if err := aggregateFolders(); err != nil {
@@ -228,7 +230,7 @@ func downloadEmailsFromInbox(imapClient *Client, mailBoxName string) error {
 	emails := []Email{}
 
 	// read only ensures that upon fetching the email is not marked as read
-	readOnlyMailBox, err := imapClient.Select(mailBoxName, true)
+	readOnlyMailbox, err := imapClient.Select(mailBoxName, true)
 	if err != nil {
 		return joinErrors("failed to select mailbox", err)
 	}
@@ -239,13 +241,13 @@ func downloadEmailsFromInbox(imapClient *Client, mailBoxName string) error {
 		return joinErrors("failed to get next uid", err)
 	}
 
-	if startingUID == readOnlyMailBox.UidNext {
+	if startingUID == readOnlyMailbox.UidNext {
 		fmt.Printf("Already caught up with %s mailbox\n", mailBoxName)
 		return nil
 	}
 
-	numberOfEmailsToFetch := readOnlyMailBox.UidNext - startingUID
-	seqset.AddRange(startingUID, readOnlyMailBox.UidNext-1)
+	numberOfEmailsToFetch := readOnlyMailbox.UidNext - startingUID
+	seqset.AddRange(startingUID, readOnlyMailbox.UidNext-1)
 	messages := make(chan *imap.Message)
 	done := make(chan error, 1)
 	section := &imap.BodySectionName{}
@@ -490,7 +492,7 @@ func downloadEmailsFromInbox(imapClient *Client, mailBoxName string) error {
 		return joinErrors("failed to add emails to db", err)
 	}
 
-	if err := setNextUID(mailBoxName, readOnlyMailBox.UidNext); err != nil {
+	if err := setNextUID(mailBoxName, readOnlyMailbox.UidNext); err != nil {
 		return joinErrors("failed to set next uid", err)
 	}
 
