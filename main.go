@@ -1,49 +1,29 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
+	"crypto/sha256"
+	"crypto/tls"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/joho/godotenv"
+	"github.com/schollz/progressbar/v3"
+	"io"
 	"log"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
-	"time"
 
-	"github.com/emersion/go-imap/v2"
-	"github.com/emersion/go-imap/v2/imapclient"
-	"github.com/emersion/go-message/textproto"
+	"github.com/emersion/go-imap"
+	"github.com/emersion/go-imap/client"
+	"github.com/emersion/go-message/charset"
+	"github.com/emersion/go-message/mail"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mitchellh/mapstructure"
-	"github.com/sony/sonyflake"
 )
-
-const januaryFirst2024 = 1704060000
-
-var sf *sonyflake.Sonyflake
-
-func nextSonyflake() uint64 {
-	if id, err := sf.NextID(); err != nil {
-		panic(err)
-	} else {
-		return id
-	}
-}
-
-func initIdGenerator() error {
-	settings := sonyflake.Settings{
-		StartTime: time.Unix(januaryFirst2024, 0),
-	}
-	settings.MachineID = func() (uint16, error) {
-		// if this ever gets scaled to multiple machines, this should be set externally
-		return 1, nil
-	}
-	sf = sonyflake.NewSonyflake(settings)
-	_, err := sf.NextID()
-	return err
-}
 
 type Disposition string
 
@@ -54,282 +34,635 @@ const (
 )
 
 type AttachmentMetaData struct {
-	EmailUID    uint64
 	FileName    string
 	FileType    string
 	FileSubType string
-	FileSize    uint32
+	FileSize    int
 	Encoding    string
 	Disposition Disposition
 }
 
 type Email struct {
-	OurID       uint64
-	Envelope    imap.Envelope
-	Flags       []string
-	Labels      []string
-	UID         uint32
-	TextContent string
-	HTMLContent string
-	Attachments []AttachmentMetaData
+	Mailbox      string
+	ParseWarning string
+	ParseError   string
+	OurID        string
+	Envelope     *imap.Envelope
+	Flags        []string
+	UID          uint32
+	TextContent  string
+	HTMLContent  string
+	Attachments  []AttachmentMetaData
 }
 
-// Envelope
-// Date      time.Time
-// Subject   string
-// From      []Address
-// Sender    []Address
-// ReplyTo   []Address
-// To        []Address
-// Cc        []Address
-// Bcc       []Address
-// InReplyTo string
-// MessageID string
+type Options struct {
+	Email             string
+	Password          string
+	ImapServer        string
+	StrictMailParsing bool
+	// WARNING: setting DEBUG to true creates a huge debug.txt file
+	Debug bool
+}
 
-type Data struct {
-	UID           string
-	Path          string
-	BodyStructure string
-	Subject       string
+type Client struct {
+	*client.Client
+	Options *Options
+}
+
+func joinErrors(message string, err error) error {
+	return errors.Join(errors.New(message), err)
+}
+
+func setup() *Client {
+	// from wiki: The imap.CharsetReader variable can be set by end users to parse charsets other than us-ascii and utf-8.
+	// For instance, go-message's charset.Reader (which supports all common encodings) can be used:
+	imap.CharsetReader = charset.Reader
+
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
+
+	options, err := setupOptions()
+	if err != nil {
+		log.Fatal("failed to setup options", err)
+	}
+
+	imapClient, err := setupImapClient(options)
+
+	if err != nil {
+		log.Fatal("failed to setup imap client", err)
+	}
+
+	err = initDB()
+	if err != nil {
+		log.Fatal("failed to init db", err)
+	}
+
+	return imapClient
+
+}
+
+func setupOptions() (*Options, error) {
+	options := &Options{}
+	for _, enivronVal := range os.Environ() {
+		kv := strings.Split(enivronVal, "=")
+		if len(kv) != 2 {
+			continue
+		}
+		key := kv[0]
+		value := kv[1]
+		switch strings.ToUpper(key) {
+		case "EMAIL":
+			options.Email = value
+		case "PASSWORD":
+			options.Password = value
+		case "IMAP_SERVER":
+			options.ImapServer = value
+			if !strings.Contains(value, ":") {
+				options.ImapServer = value + ":993"
+			}
+		case "STRICT_MAIL_PARSING":
+			options.StrictMailParsing, _ = strconv.ParseBool(value)
+		case "DEBUG":
+			options.Debug, _ = strconv.ParseBool(value)
+		}
+	}
+
+	if options.Email == "" {
+		return nil, errors.New("missing EMAIL")
+	}
+	if options.Password == "" {
+		return nil, errors.New("missing PASSWORD")
+	}
+	if options.ImapServer == "" {
+		return nil, errors.New("missing IMAPSERVER")
+	}
+
+	return options, nil
+}
+
+func setupImapClient(options *Options) (*Client, error) {
+	imapClient, err := client.DialTLS(options.ImapServer, &tls.Config{})
+
+	if err != nil {
+		log.Fatal("failed to dial imap server", err)
+	}
+
+	if options.Debug {
+		debugFile := "debug.txt"
+		debugFileHandle, err := os.OpenFile(debugFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		os.Truncate(debugFile, 0)
+		if err != nil {
+			log.Fatal(err)
+		}
+		imapClient.SetDebug(debugFileHandle)
+	}
+	if err := imapClient.Login(options.Email, options.Password); err != nil {
+		log.Fatal("failed to login", err)
+	}
+	return &Client{
+		imapClient,
+		options,
+	}, nil
+
+}
+
+func downloadEachMailBox(imapClient *Client) error {
+	mailboxes := make(chan *imap.MailboxInfo)
+	doneMailboxList := make(chan error, 1)
+	go func() {
+		doneMailboxList <- imapClient.List("", "*", mailboxes)
+	}()
+
+	mailboxNames := []string{}
+	skip := []string{"[Gmail]/All Mail", "[Gmail]/Important"}
+	// we need to close the mailbox channel before we can select a mailbox, so we extract the mailbox names first
+	for m := range mailboxes {
+		toUse := true
+		for _, v := range m.Attributes {
+			if v == "\\Noselect" {
+				toUse = false
+			}
+		}
+		for _, v := range skip {
+			if v == m.Name {
+				toUse = false
+			}
+		}
+		if !toUse {
+			continue
+		}
+		mailboxNames = append(mailboxNames, m.Name)
+	}
+
+	if err := <-doneMailboxList; err != nil {
+		return joinErrors("failed to list mailboxes", err)
+	}
+
+	for _, m := range mailboxNames {
+		err := downloadEmailsFromInbox(imapClient, m)
+		if err != nil {
+			return joinErrors("failed to download emails from inbox", err)
+		}
+	}
+	return nil
 }
 
 func main() {
-	err := initIdGenerator()
-	if err != nil {
-		log.Fatalf("failed to init id generator: %v", err)
+
+	imapClient := setup()
+	defer imapClient.Logout()
+
+	if err := downloadEachMailBox(imapClient); err != nil {
+		log.Fatal("failed to download each mailbox", err)
 	}
-
-	password := ""
-	email := "shmuelkamensky@gmail.com"
-	imapServer := "imap.gmail.com:993"
-
-	// create a new file:
-	f, err := os.Create("log.txt")
-	f.Truncate(0)
-
-	c, err := imapclient.DialTLS(imapServer, &imapclient.Options{
-		DebugWriter: f,
-	})
-	if err != nil {
-		log.Fatalf("failed to dial IMAP server: %v", err)
+	if err := aggregateFolders(); err != nil {
+		log.Fatal("failed to aggregate folders", err)
 	}
-	defer c.Close()
+	fmt.Println("Downloaded all emails")
 
-	loginCommand := c.Login(email, password)
-	err = loginCommand.Wait()
-	if err != nil {
-		log.Fatalf("failed to login: %v", err)
-	}
-
-	mailboxes, err := c.List("", "%", nil).Collect()
-	if err != nil {
-		log.Fatalf("failed to list mailboxes: %v", err)
-	}
-	log.Printf("Found %v mailboxes", len(mailboxes))
-	for _, mbox := range mailboxes {
-		log.Printf(" - %v", mbox.Mailbox)
-	}
-
-	selectedMbox, err := c.Select("INBOX", nil).Wait()
-	if err != nil {
-		log.Fatalf("failed to select INBOX: %v", err)
-	}
-	log.Printf("INBOX contains %v messages", selectedMbox.NumMessages)
-
-	numMessagesToFetch := uint32(100)
-	if selectedMbox.NumMessages > 0 {
-		seqSet := new(imap.SeqSet)
-		seqSet.AddRange(selectedMbox.NumMessages-numMessagesToFetch-1, selectedMbox.NumMessages)
-
-		fetchOptions := &imap.FetchOptions{
-			Flags:    true,
-			UID:      true,
-			Envelope: true,
-			BodyStructure: &imap.FetchItemBodyStructure{
-				Extended: true,
-			},
-			BodySection: []*imap.FetchItemBodySection{
-				{
-					Specifier: imap.PartSpecifierHeader,
-				},
-				{
-					Specifier: imap.PartSpecifierText,
-				},
-			},
-		}
-		emails := []Email{}
-		messages, err := c.Fetch(*seqSet, fetchOptions).Collect()
-		if err != nil {
-			log.Fatalf("failed to fetch messages: %v", err)
-		}
-
-		sequenceSet := new(imap.SeqSet)
-
-		//open new sqlite db
-		db, err := sql.Open("sqlite3", "./data.db")
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer db.Close()
-		// drop table if exists
-		_, err = db.Exec("DROP TABLE IF EXISTS data")
-		if err != nil {
-			log.Fatal(err)
-		}
-		// create table
-		_, err = db.Exec("CREATE TABLE data (our_id int, emailData TEXT, subject TEXT)")
-		if err != nil {
-			log.Fatal(err)
-		}
-		// prepare statement
-		stmt, err := db.Prepare("INSERT INTO data(our_id, emailData, subject) values(?,?,?)")
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer stmt.Close()
-
-		fmt.Println("messages: ", len(messages))
-		for _, msg := range messages {
-
-			sequenceSet.AddNum(msg.SeqNum)
-			flags := []string{}
-			for _, flag := range msg.Flags {
-				flags = append(flags, string(flag))
-			}
-			email := Email{
-				OurID:    nextSonyflake(),
-				Envelope: *msg.Envelope,
-				Flags:    flags,
-				UID:      msg.UID,
-			}
-
-			textualNodes := [][]int{}
-
-			msg.BodyStructure.Walk(func(path []int, bs imap.BodyStructure) (walkChildren bool) {
-
-				_, multiOk := bs.(*imap.BodyStructureMultiPart)
-				if multiOk {
-					// children will be walked automatically, no need to address container directly
-					return true
-				}
-
-				part, ok := bs.(*imap.BodyStructureSinglePart)
-
-				if !ok {
-					return true
-				}
-
-				if strings.HasPrefix(strings.ToLower(part.MediaType()), "text/") {
-					// handled elsewhere
-					textualNodes = append(textualNodes, path)
-					return true
-				}
-
-				attachment := extractMetadata(part)
-
-				if !structIsEmpty(attachment) {
-					attachment.EmailUID = email.OurID
-					email.Attachments = append(email.Attachments, attachment)
-				}
-				return true
-			})
-
-			for _, path := range textualNodes {
-				fmt.Println("text node path: ", path)
-			}
-			count := 0
-			for section, byteArray := range msg.BodySection {
-				reader := bytes.NewReader(byteArray)
-				bufioReader := bufio.NewReader(reader)
-				if section.Specifier == imap.PartSpecifierHeader {
-					fmt.Println("Header is at ", count)
-					headers, err := textproto.ReadHeader(bufioReader)
-					if err != nil {
-						log.Fatalf("failed to read header: %v", err)
-					}
-					contentType := headers.Get("Content-Type")
-					fmt.Println("Content-Type: ", contentType)
-
-				} else if section.Specifier == imap.PartSpecifierText {
-					fmt.Println("Text is at ", count)
-				} else {
-					fmt.Println("section.Specifier: ", section.Specifier, " is at ", count)
-				}
-				count++
-
-			}
-
-			emails = append(emails, email)
-
-		}
-		fmt.Println("Inserting emails into db")
-
-		for _, email := range emails {
-			rawData := map[string]interface{}{}
-			err = mapstructure.Decode(email, &rawData)
-			if err != nil {
-				log.Fatalf("failed to decode email: %v", err)
-			}
-			jsonData, err := json.MarshalIndent(rawData, "", "  ")
-			if err != nil {
-				log.Fatalf("failed to marshal email: %v", err)
-			}
-			stmt.Exec(email.OurID, string(jsonData), email.Envelope.Subject)
-		}
-		if err := c.Logout().Wait(); err != nil {
-			log.Fatalf("failed to logout: %v", err)
-		}
-
-		log.Println("Done!")
-	}
 }
 
-func extractMetadata(bs *imap.BodyStructureSinglePart) AttachmentMetaData {
-	possibleFileNameParams := []string{"filename", "name", "FILENAME", "NAME"}
-	bsInternal := *bs
-	attachment := AttachmentMetaData{}
+func downloadEmailsFromInbox(imapClient *Client, mailBoxName string) error {
+	emails := []Email{}
 
-	if bsInternal.Disposition() != nil {
-		params := bsInternal.Disposition().Params
-		attachment.FileName = bs.Filename()
-		attachment.FileSize = bs.Size
-		attachment.Disposition = DispositionUnknown
-		attachment.FileType = bsInternal.Type
-		attachment.FileSubType = bsInternal.Subtype
-		attachment.Encoding = bsInternal.Encoding
+	// read only ensures that upon fetching the email is not marked as read
+	readOnlyMailBox, err := imapClient.Select(mailBoxName, true)
+	if err != nil {
+		return joinErrors("failed to select mailbox", err)
+	}
+	seqset := new(imap.SeqSet)
 
-		// try and resolve filename. TODO add Extended support
-		if attachment.FileName == "" {
-			fileNameParam := ""
-			for _, param := range possibleFileNameParams {
-				if val, ok := params[param]; ok {
-					fileNameParam = val
+	startingUID, err := getNextUID(mailBoxName)
+	if err != nil {
+		return joinErrors("failed to get next uid", err)
+	}
+
+	if startingUID == readOnlyMailBox.UidNext {
+		fmt.Printf("Already caught up with %s mailbox\n", mailBoxName)
+		return nil
+	}
+
+	numberOfEmailsToFetch := readOnlyMailBox.UidNext - startingUID
+	seqset.AddRange(startingUID, readOnlyMailBox.UidNext-1)
+	messages := make(chan *imap.Message)
+	done := make(chan error, 1)
+	section := &imap.BodySectionName{}
+
+	go func() {
+		items := []imap.FetchItem{
+			section.FetchItem(),
+			imap.FetchEnvelope,
+			imap.FetchFlags,
+			imap.FetchUid,
+		}
+
+		done <- imapClient.Fetch(seqset, items, messages)
+	}()
+
+	fmt.Println()
+	bar := progressbar.Default(int64(numberOfEmailsToFetch), "Downloading emails from "+mailBoxName+" mailbox")
+
+	for msg := range messages {
+		bar.Add(1)
+
+		// our id is a hash because message-id isn't reliable
+		hashSources := []string{}
+
+		email := Email{
+			Flags:    msg.Flags,
+			UID:      msg.Uid,
+			Envelope: msg.Envelope,
+			Mailbox:  mailBoxName,
+		}
+
+		if !isInterfaceNil(email.Envelope) {
+			if !isInterfaceNil(email.Envelope.Date) {
+				hashSources = append(hashSources, email.Envelope.Date.String())
+			}
+			if !isInterfaceNil(email.Envelope.Subject) {
+				hashSources = append(hashSources, email.Envelope.Subject)
+			}
+			if !isInterfaceNil(email.Envelope.From) {
+				hashSources = append(hashSources, MustJSON(email.Envelope.From))
+			}
+			if !isInterfaceNil(email.Envelope.To) {
+				hashSources = append(hashSources, MustJSON(email.Envelope.To))
+			}
+			if !isInterfaceNil(email.Envelope.Cc) {
+				hashSources = append(hashSources, MustJSON(email.Envelope.Cc))
+			}
+			if !isInterfaceNil(email.Envelope.Bcc) {
+				hashSources = append(hashSources, MustJSON(email.Envelope.Bcc))
+			}
+			if !isInterfaceNil(email.Envelope.ReplyTo) {
+				hashSources = append(hashSources, MustJSON(email.Envelope.ReplyTo))
+			}
+			if !isInterfaceNil(email.Envelope.InReplyTo) {
+				hashSources = append(hashSources, email.Envelope.InReplyTo)
+			}
+			if !isInterfaceNil(email.Envelope.MessageId) {
+				hashSources = append(hashSources, email.Envelope.MessageId)
+			}
+		} else {
+			// not much else we can do
+			email.OurID = "nil-envelope;uid=" + strconv.Itoa(int(email.UID))
+		}
+
+		// NOTE: if needed in the future we can also hash the body, but I haven't seen any collisions yet,
+		// 		 so it seems overkill
+		hasher := sha256.New()
+		hasher.Write([]byte(strings.Join(hashSources, "")))
+		email.OurID = hex.EncodeToString(hasher.Sum(nil))
+
+		r := msg.GetBody(section)
+		if r == nil {
+			errorMsg := "Server didn't returned message body"
+			if imapClient.Options.StrictMailParsing {
+				log.Fatal(errorMsg)
+			} else {
+				email.ParseError = errorMsg
+				emails = append(emails, email)
+				continue
+			}
+		}
+		// Create a new mail reader
+		mr, err := mail.CreateReader(r)
+		if err != nil {
+			errorMessage := fmt.Sprintf("failed to create mail reader: %v", err)
+			if imapClient.Options.StrictMailParsing {
+				log.Fatal(errorMessage, "\n")
+			} else {
+				email.ParseError = errorMessage
+				emails = append(emails, email)
+				continue
+			}
+		}
+
+		for {
+
+			// optimistic parsing, consume as much as possible
+			// if we hit an error, we'll just set the parse error and move on, unless we're in strict mode
+			// we only save the last error we hit
+			part, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			} else if err != nil {
+				if imapClient.Options.StrictMailParsing {
+					log.Fatal("failed to parse next part ", err)
+				} else {
+
+					email.ParseError = err.Error()
+				}
+			}
+			// sometime part is nil, not sure why, we'll consider that an error
+			if part == nil {
+				if imapClient.Options.StrictMailParsing {
+					log.Fatal("part is nil")
+				} else {
+					email.ParseError = "received an empty message part from the mail parser"
 					break
 				}
 			}
 
-			if fileNameParam != "" {
-				attachment.FileName = bsInternal.Disposition().Params[fileNameParam]
-			}
-		}
+			switch h := part.Header.(type) {
+			case *mail.InlineHeader:
+				// can be plain-text , HTML, or inline attachments
+				contentType, params, err := h.ContentType()
+				if err != nil {
+					if imapClient.Options.StrictMailParsing {
+						log.Fatal("failed to get content type", err)
+					} else {
+						email.ParseError = err.Error()
+						break
+					}
+				}
+				content, contentErr := io.ReadAll(part.Body)
+				if contentErr != nil {
+					if imapClient.Options.StrictMailParsing {
+						log.Fatal("failed to read body", err)
+					} else {
+						email.ParseError = contentErr.Error()
+					}
+				}
+				isHtml := strings.HasPrefix(contentType, "text/html")
+				isText := strings.HasPrefix(contentType, "text/plain")
 
-		if attachment.FileName == "" {
-			attachment.FileName = bsInternal.Description
-		}
+				if isHtml || isText {
+					if isHtml && contentErr == nil {
+						email.HTMLContent = string(content)
+					}
+					if isText && contentErr == nil {
+						email.TextContent = string(content)
+					}
+				} else if strings.HasPrefix(contentType, "image/") {
+					// image header looks like this:
+					/*
+						------_=_NextPart_e4d7791e-5588-4ad7-a5dc-070785def2b1
+						Content-Type: image/png;
+							name="image613224.png"
+						Content-Transfer-Encoding: base64
+						Content-ID: <image613224.png@0D025374.04F2C0BC>
+						Content-Description: image613224.png
+						Content-Disposition: inline;
+							creation-date="Thu, 04 Jan 2024 15:46:38 +0000";
+							filename=image613224.png;
+							modification-date="Thu, 04 Jan 2024 15:46:38 +0000";
+							size=1841
+					*/
 
-		if bsInternal.Disposition() != nil {
-			dispositionLower := strings.ToLower(bsInternal.Disposition().Value)
-			switch dispositionLower {
-			case "attachment":
+					attachment := AttachmentMetaData{}
+					fileName := h.Get("Content-Description")
+					size := 0
+					if fileName == "" {
+						// try and get name param
+						for _, param := range []string{"name", "filename", "NAME", "FILENAME"} {
+							if fileName != "" {
+								break
+							}
+							if val, ok := params[param]; ok {
+								fileName = val
+							}
+						}
+					}
+
+					if fileName == "" {
+						fileName = h.Get("Content-ID")
+					}
+
+					if contentErr == nil {
+						size = len(content)
+					}
+
+					attachment.Disposition = DispositionInline
+					attachment.Encoding = h.Get("Content-Transfer-Encoding")
+					attachment.FileType = contentType
+					attachment.FileName = fileName
+					attachment.FileSize = size
+					email.Attachments = append(email.Attachments, attachment)
+
+				} else {
+					email.ParseWarning = fmt.Sprintf("unknown inline content type: %v\n", contentType)
+					break
+				}
+			case *mail.AttachmentHeader:
+				attachment := AttachmentMetaData{}
+
+				contentType, _, err := h.ContentType()
+				if err != nil {
+					if imapClient.Options.StrictMailParsing {
+						log.Fatal("failed to get content type", err)
+					} else {
+						email.ParseError = err.Error()
+						break
+					}
+				}
+
+				content, contentErr := io.ReadAll(part.Body)
+				if contentErr != nil && imapClient.Options.StrictMailParsing {
+					log.Fatal("failed to read body", err)
+				}
+
+				filename, _ := h.Filename()
+
+				if filename == "" {
+					filename = h.Get("Content-Description")
+				}
+				encoding := h.Get("Content-Transfer-Encoding")
+				attachment.FileName = filename
+				attachment.FileSize = len(content)
+				attachment.Encoding = encoding
+				attachment.FileType = contentType
 				attachment.Disposition = DispositionAttachment
-			case "inline":
-				attachment.Disposition = DispositionInline
+				email.Attachments = append(email.Attachments, attachment)
+
 			}
+
 		}
+		emails = append(emails, email)
 	}
-	return attachment
+	if err := <-done; err != nil {
+		return joinErrors("failed to fetch mail", err)
+	}
+
+	if err := addToDB(emails); err != nil {
+		return joinErrors("failed to add emails to db", err)
+	}
+
+	if err := setNextUID(mailBoxName, readOnlyMailBox.UidNext); err != nil {
+		return joinErrors("failed to set next uid", err)
+	}
+
+	return nil
 }
 
-func structIsEmpty(i interface{}) bool {
-	return i == nil || reflect.DeepEqual(i, reflect.Zero(reflect.TypeOf(i)).Interface())
+func initDB() error {
+	_, err := os.Stat("./data.db")
+	if err == nil {
+		fmt.Printf("data.db already exists, skipping init\n")
+		return nil
+	}
+
+	db, err := sql.Open("sqlite3", "./data.db")
+	if err != nil {
+		return joinErrors("failed to open db", err)
+	}
+	defer db.Close()
+	_, err = db.Exec("DROP TABLE IF EXISTS email")
+	if err != nil {
+		return joinErrors("failed to drop table emails", err)
+	}
+	_, err = db.Exec("CREATE TABLE email (parse_warning text, parse_error text,our_id text primary key, envelope text, flags text, folders text, uid int, text_content text, html_content text, attachments text)")
+	if err != nil {
+		return joinErrors("failed to create table email", err)
+	}
+
+	_, err = db.Exec("DROP TABLE IF EXISTS message_to_folder")
+	if err != nil {
+		return joinErrors("failed to drop table folders", err)
+	}
+
+	_, err = db.Exec("CREATE TABLE message_to_folder (folder_name text, email_id text)")
+	if err != nil {
+		return joinErrors("failed to create message_to_folder table", err)
+	}
+	// index on email_id so our updates are faster
+	_, err = db.Exec("CREATE INDEX email_id_index ON message_to_folder (email_id)")
+	if err != nil {
+		return joinErrors("failed to create email_id_index index", err)
+	}
+
+	_, err = db.Exec("DROP TABLE IF EXISTS folder")
+	if err != nil {
+		return joinErrors("failed to drop table folders", err)
+	}
+	_, err = db.Exec("CREATE TABLE folder (name text primary key,uid_next int)")
+	if err != nil {
+		return joinErrors("failed to create folder table", err)
+	}
+
+	return nil
+}
+
+func setNextUID(mailboxName string, nextUID uint32) error {
+	db, err := sql.Open("sqlite3", "./data.db")
+	if err != nil {
+		return joinErrors("failed to open db", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec("INSERT INTO folder (name, uid_next) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET uid_next = ?", mailboxName, nextUID, nextUID)
+	if err != nil {
+		return joinErrors("failed to set next uid", err)
+	}
+	return nil
+}
+
+func getNextUID(mailboxName string) (uint32, error) {
+	db, err := sql.Open("sqlite3", "./data.db")
+	if err != nil {
+		return 0, joinErrors("failed to open db", err)
+	}
+	defer db.Close()
+
+	var uid uint32
+	err = db.QueryRow("SELECT uid_next FROM folder WHERE name = ?", mailboxName).Scan(&uid)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return 1, nil
+		}
+		return 0, joinErrors("failed to get next uid", err)
+	}
+	return uid, nil
+}
+
+func addToDB(emails []Email) error {
+	db, err := sql.Open("sqlite3", "./data.db")
+	if err != nil {
+		return joinErrors("failed to open db", err)
+	}
+	defer db.Close()
+
+	insertEmailStmnt, err := db.Prepare(`
+		INSERT INTO email (parse_warning, parse_error, our_id, envelope, flags, uid, text_content, html_content, attachments)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (our_id) DO NOTHING
+	`)
+
+	if err != nil {
+		return joinErrors("failed to prepare insert statement", err)
+	}
+	defer insertEmailStmnt.Close()
+
+	insertFolderStmnt, err := db.Prepare(`
+		INSERT INTO message_to_folder (folder_name, email_id)
+		VALUES (?, ?)`)
+	if err != nil {
+		return joinErrors("failed to prepare insert statement", err)
+	}
+
+	// todo don't insert in a loop
+	for _, email := range emails {
+		_, err = insertEmailStmnt.Exec(email.ParseWarning, email.ParseError, email.OurID, MustJSON(email.Envelope), MustJSON(email.Flags), email.UID, email.TextContent, email.HTMLContent, MustJSON(email.Attachments))
+		if err != nil {
+			return joinErrors("failed to insert email", err)
+		}
+		_, err = insertFolderStmnt.Exec(email.Mailbox, email.OurID)
+	}
+
+	return nil
+}
+
+func aggregateFolders() error {
+
+	db, err := sql.Open("sqlite3", "./data.db")
+	if err != nil {
+		return joinErrors("failed to open db", err)
+	}
+
+	// update emails table, folders will be a json list of folders.
+	_, err = db.Exec(`
+			update email
+			set folders = subtable.folders
+			FROM
+			(
+				select json_group_array(folder_name) folders, email_id
+				FROM message_to_folder
+				GROUP BY email_id
+			) subtable
+			WHERE email.our_id = subtable.email_id;
+	`)
+	if err != nil {
+		return joinErrors("failed to update email table", err)
+	}
+
+	return nil
+
+}
+
+func MustJSON(i interface{}) string {
+	if reflect.TypeOf(i).Kind() == reflect.Struct {
+		var mapInterface map[string]interface{}
+		err := mapstructure.Decode(i, &mapInterface)
+		if err != nil {
+			log.Fatal("failed to decode interface to map ", err)
+		}
+
+		json, err := json.Marshal(mapInterface)
+		if err != nil {
+			log.Fatal("failed to marshal map to json", err)
+		}
+		return string(json)
+	} else {
+		json, err := json.Marshal(i)
+		if err != nil {
+			log.Fatal("failed to marshal interface to json", err)
+		}
+		return string(json)
+	}
+}
+
+func isInterfaceNil(i interface{}) bool {
+	return reflect.DeepEqual(i, reflect.Zero(reflect.TypeOf(i)).Interface())
 }
