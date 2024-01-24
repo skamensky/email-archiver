@@ -6,6 +6,9 @@ The goal is to be able to filter and aggregate email by their metadata (e.g. sen
 # Current state
 As of now, connection pooling of imap connections work all together to download all unique emails. Emails are parsed (including attachment metadata) and a unique id is used by hashing the contents. This way, emails in multiple folders (which is how gmail handles labels, by copying mail into multiple folders), can be correctly tagged with the proper labels/folders.
 
+
+A preliminary frontend is a work in progress. The react frontend is served by the same webserver as the backend. So all you need to do is "go run cmd/main.go serve" to get a working frontend and backend.
+
 # Options
 
 All options are read from environment variables. This program supports `.env`.
@@ -55,8 +58,3 @@ The following fields will be made available directly:
 `bcc_name_1`: `SampleBCC`
 `bcc_mailbox_1`: `samplebcc`
 `bcc_host_1`: `gmail.com`
-
-# TODO
-Let's add an interface and a builtin webserver!
-
-# 
