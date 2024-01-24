@@ -25,7 +25,7 @@ type ClientConnPool struct {
 
 func NewClientConnPool(options models.Options, statusHandler func(models.MailboxEvent)) models.ClientPool {
 	pool := &ClientConnPool{
-		pool:           make(chan models.Client, options.MaxPoolSize()),
+		pool:           make(chan models.Client, options.GetMaxPoolSize()),
 		options:        options,
 		mailboxesCache: make(map[string]models.Mailbox),
 		statuses:       make(chan models.MailboxEvent),
@@ -64,7 +64,7 @@ func (clientPool *ClientConnPool) Get() (models.Client, error) {
 	default:
 
 		// lazy create new connection if we haven't reached max pool size
-		if len(clientPool.poolMap) < clientPool.options.MaxPoolSize() {
+		if len(clientPool.poolMap) < clientPool.options.GetMaxPoolSize() {
 			defer clientPool.checkoutMut.Unlock()
 			client, err := newClient(clientPool.options, clientPool.statusesHandler, nextId, clientPool)
 			if err != nil {
@@ -263,8 +263,8 @@ func (pool *ClientConnPool) DownloadAllMailboxes() error {
 	}
 
 	mailboxNameToInfo := map[string]models.Mailbox{}
-	skipMailboxes := utils.NewSet(pool.options.SkipMailboxes())
-	limitToMailboxes := utils.NewSet(pool.options.LimitToMailboxes())
+	skipMailboxes := utils.NewSet(pool.options.GetSkipMailboxes())
+	limitToMailboxes := utils.NewSet(pool.options.GetLimitToMailboxes())
 	allMailboxes := utils.NewSet([]string{})
 	unselectableMailboxes := utils.NewSet([]string{})
 

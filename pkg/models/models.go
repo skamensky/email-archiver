@@ -60,17 +60,64 @@ type AttachmentMetaData struct {
 	Disposition Disposition
 }
 
+type SQLWhereOperator string
+
+const (
+	SQLWhereOperatorEquals              SQLWhereOperator = "="
+	SQLWhereOperatorNotEquals           SQLWhereOperator = "!="
+	SQLWhereOperatorGreaterThan         SQLWhereOperator = ">"
+	SQLWhereOperatorLessThan            SQLWhereOperator = "<"
+	SQLWhereOperatorGreaterThanOrEquals SQLWhereOperator = ">="
+	SQLWhereOperatorLessThanOrEquals    SQLWhereOperator = "<="
+	SQLWhereOperatorLike                SQLWhereOperator = "LIKE"
+	SQLWhereOperatorNotLike             SQLWhereOperator = "NOT LIKE"
+	SQLWhereOperatorIn                  SQLWhereOperator = "IN"
+	SQLWhereOperatorNotIn               SQLWhereOperator = "NOT IN"
+	SQLWhereOperatorIsNull              SQLWhereOperator = "IS NULL"
+	SQLWhereOperatorIsNotNull           SQLWhereOperator = "IS NOT NULL"
+	SQLJsonPathEquals                   SQLWhereOperator = "JSON_PATH_EQUALS"
+)
+
+type SQLWhereCondition struct {
+	Column   string
+	Value    string
+	Operator SQLWhereOperator
+	Extra    string
+}
+
 type Email interface {
-	Mailbox() string
-	ParseWarning() string
-	ParseError() string
-	OurID() string
-	Envelope() *imap.Envelope
-	Flags() []string
-	UID() uint32
-	TextContent() string
-	HTMLContent() string
-	Attachments() []AttachmentMetaData
+	GetMailbox() string
+	GetParseWarning() string
+	GetParseError() string
+	GetOurID() string
+	GetEnvelope() *imap.Envelope
+	GetFlags() []string
+	GetUID() uint32
+	GetTextContent() string
+	GetHTMLContent() string
+	GetAttachments() []AttachmentMetaData
+	GetMessageId() string
+	GetDate() string
+	GetSubject() string
+	GetFromName1() string
+	GetFromMailbox1() string
+	GetFromHost1() string
+	GetSenderName1() string
+	GetSenderMailbox1() string
+	GetSenderHost1() string
+	GetReplyToName1() string
+	GetReplyToMailbox1() string
+	GetReplyToHost1() string
+	GetToName1() string
+	GetToMailbox1() string
+	GetToHost1() string
+	GetCcName1() string
+	GetCcMailbox1() string
+	GetCcHost1() string
+	GetBccName1() string
+	GetBccMailbox1() string
+	GetBccHost1() string
+	GetInReplyTo() string
 }
 
 type Mailbox interface {
@@ -86,16 +133,16 @@ type Mailbox interface {
 }
 
 type Options interface {
-	ImapServer() string
-	Email() string
-	Password() string
-	StrictMailParsing() bool
-	ImapClientDebug() bool
-	Debug() bool
-	LimitToMailboxes() []string
-	SkipMailboxes() []string
-	DBPath() string
-	MaxPoolSize() int
+	GetImapServer() string
+	GetEmail() string
+	GetPassword() string
+	GetStrictMailParsing() bool
+	GetImapClientDebug() bool
+	GetDebug() bool
+	GetLimitToMailboxes() []string
+	GetSkipMailboxes() []string
+	GetDBPath() string
+	GetMaxPoolSize() int
 }
 
 type ClientPool interface {
@@ -131,4 +178,8 @@ type DB interface {
 	UpdateLocalMailboxState(Mailbox, []uint32) error
 	GetMessagesPendingSync(Mailbox) ([]uint32, error)
 	SetMessagesToSynced(mailbox Mailbox, uids []uint32) error
+	GetEmails([]SQLWhereCondition) ([]Email, error)
+	// todo: allow for options to be set and retrieved in DB in addition to env vars
+	//GetOptions() (Options, error)
+	//SetOptions(Options) error
 }

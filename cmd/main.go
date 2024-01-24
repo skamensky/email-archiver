@@ -8,6 +8,7 @@ import (
 	"github.com/skamensky/email-archiver/pkg/models"
 	"github.com/skamensky/email-archiver/pkg/options"
 	"github.com/skamensky/email-archiver/pkg/utils"
+	"github.com/skamensky/email-archiver/pkg/web"
 	"github.com/urfave/cli/v2"
 	"log"
 	"net/http"
@@ -83,6 +84,18 @@ func main() {
 					}
 					defer imapClient.Close()
 					return imapClient.DownloadAllMailboxes()
+				},
+			},
+			{
+				Name:    "serve",
+				Aliases: []string{"s"},
+				Usage:   "serve the web ui",
+				Action: func(cCtx *cli.Context) error {
+					_, err := setup()
+					if err != nil {
+						return err
+					}
+					return web.Start()
 				},
 			},
 		},

@@ -38,7 +38,7 @@ func newClient(ops models.Options, statusesHandler func(models.MailboxEvent), id
 		}
 	}()
 
-	imapClient, err := goImapClient.DialTLS(ops.ImapServer(), &tls.Config{})
+	imapClient, err := goImapClient.DialTLS(ops.GetImapServer(), &tls.Config{})
 
 	if err != nil {
 		return nil, utils.JoinErrors("failed to dial imap server", err)
@@ -48,7 +48,7 @@ func newClient(ops models.Options, statusesHandler func(models.MailboxEvent), id
 
 	utils.DebugPrintln(fmt.Sprintf("client %d: connected to imap server", id))
 
-	if ops.ImapClientDebug() {
+	if ops.GetImapClientDebug() {
 		debugFile := "debug_" + strconv.Itoa(id) + ".log"
 		debugFileHandle, err := os.OpenFile(debugFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 		err = utils.JoinErrors("unable to truncate debug file", os.Truncate(debugFile, 0))
@@ -58,7 +58,7 @@ func newClient(ops models.Options, statusesHandler func(models.MailboxEvent), id
 
 		imapClient.SetDebug(debugFileHandle)
 	}
-	if err := imapClient.Login(ops.Email(), ops.Password()); err != nil {
+	if err := imapClient.Login(ops.GetEmail(), ops.GetPassword()); err != nil {
 		return nil, utils.JoinErrors("failed to login", err)
 	}
 

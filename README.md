@@ -26,5 +26,37 @@ All options are read from environment variables. This program supports `.env`.
 # Run
 `go run cmd/main.go download`
 
+# Data
+Some data in email is array like. All data will be stored and queriable via a json query like interface, but for simplicity, the first piece of data is extracted from each array.
+
+For example:
+
+```json
+{"Date":"2020-04-18T00:25:36+02:00","Subject":"Travel documents,  20 jun 2018,  Ref. XXXXX,  New York-EWR - Rome-Fiumicino","From":[{"PersonalName":"Norwegian.com","AtDomainList":"","MailboxName":"noreply","HostName":"norwegian.com"}],"Sender":[{"PersonalName":"Norwegian.com","AtDomainList":"","MailboxName":"noreply","HostName":"norwegian.com"}],"ReplyTo":[{"PersonalName":"Norwegian.com","AtDomainList":"","MailboxName":"noreply","HostName":"norwegian.com"}],"To":[{"PersonalName":"","AtDomainList":"","MailboxName":"shmuelkamensky","HostName":"gmail.com"}],"Cc": [{ "PersonalName":"SampleCC", "AtDomainList":"gmail.com", "MailboxName":"samplecc", "HostName":"gmail.com" }],"Bcc":[{"PersonalName":"SampleBCC","AtDomainList":"gmail.com","MailboxName":"samplebcc","HostName":"gmail.com"}],"InReplyTo":"","MessageId":"\u003c5ad67463.sogowmbs.wovks.79c7SMTPIN_ADDED_MISSING@mx.google.com\u003e"}
+```
+The following fields will be made available directly:
+
+`from_name_1`: `Norwegian.com`
+`from_mailbox_1`: `noreply`
+`from_host_1`: `norwegian.com`
+`sender_name_1`: `Norwegian.com`
+`sender_mailbox_1`: `noreply`
+`sender_host_1`: `norwegian.com`
+`reply_to_name_1`: `Norwegian.com`
+`reply_to_mailbox_1`: `noreply`
+`reply_to_host_1`: `norwegian.com`
+ 
+`to_name_1`: ``
+`to_mailbox_1`: `shmuelkamensky`
+`to_host_1`: `gmail.com`
+`cc_name_1`: `SampleCC`
+`cc_mailbox_1`: `samplecc`
+`cc_host_1`: `gmail.com`
+`bcc_name_1`: `SampleBCC`
+`bcc_mailbox_1`: `samplebcc`
+`bcc_host_1`: `gmail.com`
+
 # TODO
 Let's add an interface and a builtin webserver!
+
+# 

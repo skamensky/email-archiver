@@ -165,13 +165,13 @@ func (mailboxWrap *Mailbox) DownloadEmails() error {
 
 		emailParsed := email.New(msg, mailboxWrap.Client())
 
-		if emailParsed.ParseWarning() != "" || emailParsed.ParseError() != "" {
+		if emailParsed.GetParseWarning() != "" || emailParsed.GetParseError() != "" {
 			warnings := []string{}
-			if emailParsed.ParseWarning() != "" {
-				warnings = append(warnings, "parse warning: "+emailParsed.ParseWarning())
+			if emailParsed.GetParseWarning() != "" {
+				warnings = append(warnings, "parse warning: "+emailParsed.GetParseWarning())
 			}
-			if emailParsed.ParseError() != "" {
-				warnings = append(warnings, "parse error: "+emailParsed.ParseError())
+			if emailParsed.GetParseError() != "" {
+				warnings = append(warnings, "parse error: "+emailParsed.GetParseError())
 			}
 			warning := strings.Join(warnings, ", ")
 			mailboxWrap.addMailboxEvent(

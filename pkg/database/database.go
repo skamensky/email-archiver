@@ -2,10 +2,15 @@ package database
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	sq "github.com/Masterminds/squirrel"
+	"github.com/jmoiron/sqlx"
+	"github.com/skamensky/email-archiver/pkg/email"
 	"github.com/skamensky/email-archiver/pkg/models"
 	"github.com/skamensky/email-archiver/pkg/utils"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -41,8 +46,8 @@ func New(options models.Options) (models.DB, error) {
 	return dATABASE, nil
 }
 
-func (dbWrap *DB) getDB() (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", dbWrap.options.DBPath())
+func (dbWrap *DB) getDB() (*sqlx.DB, error) {
+	db, err := sqlx.Connect("sqlite3", dbWrap.options.GetDBPath())
 	if err != nil {
 		return nil, utils.JoinErrors("failed to open db", err)
 	}
@@ -50,9 +55,9 @@ func (dbWrap *DB) getDB() (*sql.DB, error) {
 }
 
 func (dbWrap *DB) initDB() error {
-	_, err := os.Stat(dbWrap.options.DBPath())
+	_, err := os.Stat(dbWrap.options.GetDBPath())
 	if err == nil {
-		fmt.Printf("%v already exists, skipping init\n", dbWrap.options.DBPath())
+		fmt.Printf("%v already exists, skipping init\n", dbWrap.options.GetDBPath())
 		return nil
 	}
 
@@ -65,7 +70,40 @@ func (dbWrap *DB) initDB() error {
 	if err != nil {
 		return utils.JoinErrors("failed to drop table emails", err)
 	}
-	_, err = db.Exec("CREATE TABLE email (parse_warning text, parse_error text,our_id text primary key, envelope text, flags text, mailboxes text, text_content text, html_content text, attachments text)")
+	_, err = db.Exec(`
+		CREATE TABLE email (
+			our_id text primary key,
+			parse_warning text,
+			parse_error text,
+			envelope text,
+			flags text,
+			mailboxes text,
+			text_content text,
+			html_content text,
+			attachments text,
+			message_id text,
+			date text,
+			subject text,
+			from_name_1 text,
+			from_mailbox_1 text,
+			from_host_1 text,
+			sender_name_1 text,
+			sender_mailbox_1 text,
+			sender_host_1 text,
+			reply_to_name_1 text,
+			reply_to_mailbox_1 text,
+			reply_to_host_1 text,
+			to_name_1 text,
+			to_mailbox_1 text,
+			to_host_1 text,
+			cc_name_1 text,
+			cc_mailbox_1 text,
+			cc_host_1 text,
+			bcc_name_1 text,
+			bcc_mailbox_1 text,
+			bcc_host_1 text,
+			in_reply_to text
+		);`)
 	if err != nil {
 		return utils.JoinErrors("failed to create table email", err)
 	}
@@ -188,9 +226,9 @@ func (dbWrap *DB) AddToDB(emails []models.Email) error {
 		return utils.JoinErrors("failed to begin transaction", err)
 	}
 
-	insertEmailStmnt, err := tx.Prepare(`
-		INSERT INTO email (parse_warning, parse_error, our_id, envelope, flags, text_content, html_content, attachments)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	insertEmailStmnt, err := tx.Prepare(`INSERT INTO email (our_id,parse_warning ,parse_error ,envelope ,flags ,text_content ,html_content ,attachments ,message_id ,date ,subject ,from_name_1 ,from_mailbox_1 ,from_host_1 ,sender_name_1 ,sender_mailbox_1 ,sender_host_1 ,reply_to_name_1 ,reply_to_mailbox_1 ,reply_to_host_1 ,to_name_1 ,to_mailbox_1 ,to_host_1 ,cc_name_1 ,cc_mailbox_1 ,cc_host_1 ,bcc_name_1 ,bcc_mailbox_1 ,bcc_host_1 ,in_reply_to )
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		
 		ON CONFLICT (our_id) DO NOTHING
 	`)
 
@@ -209,13 +247,12 @@ func (dbWrap *DB) AddToDB(emails []models.Email) error {
 		return utils.JoinErrors("failed to prepare insert statement", err)
 	}
 
-	// todo don't insert in a loop
 	for _, email := range emails {
-		_, err = insertEmailStmnt.Exec(email.ParseWarning(), email.ParseError(), email.OurID(), utils.MustJSON(email.Envelope()), utils.MustJSON(email.Flags()), email.TextContent(), email.HTMLContent(), utils.MustJSON(email.Attachments()))
+		_, err = insertEmailStmnt.Exec(email.GetOurID(), email.GetParseWarning(), email.GetParseError(), utils.MustJSON(email.GetEnvelope()), email.GetFlags(), email.GetTextContent(), email.GetHTMLContent(), utils.MustJSON(email.GetAttachments()), email.GetMessageId(), email.GetDate(), email.GetSubject(), email.GetFromName1(), email.GetFromMailbox1(), email.GetFromHost1(), email.GetSenderName1(), email.GetSenderMailbox1(), email.GetSenderHost1(), email.GetReplyToName1(), email.GetReplyToMailbox1(), email.GetReplyToHost1(), email.GetToName1(), email.GetToMailbox1(), email.GetToHost1(), email.GetCcName1(), email.GetCcMailbox1(), email.GetCcHost1(), email.GetBccName1(), email.GetBccMailbox1(), email.GetBccHost1(), email.GetInReplyTo())
 		if err != nil {
 			return utils.JoinErrors("failed to insert email", err)
 		}
-		_, err = insertFolderStmnt.Exec(email.Mailbox(), email.OurID(), email.UID())
+		_, err = insertFolderStmnt.Exec(email.GetMailbox(), email.GetOurID(), email.GetUID())
 		if err != nil {
 			return utils.JoinErrors("failed to insert folder", err)
 		}
@@ -385,4 +422,74 @@ func (dbWrap *DB) truncateStaging() error {
 	}
 	_, err = db.Exec("DELETE FROM message_staging")
 	return utils.JoinErrors("failed to truncate message_staging", err)
+}
+
+func (dbWrap *DB) GetEmails(conditions []models.SQLWhereCondition) ([]models.Email, error) {
+	db, err := dbWrap.getDB()
+
+	if err != nil {
+		return nil, utils.JoinErrors("failed to open db", err)
+	}
+	defer db.Close()
+	selectStmnt := sq.Select("*").From("email")
+	emails := []models.Email{}
+	for _, condition := range conditions {
+		switch condition.Operator {
+		case models.SQLWhereOperatorEquals:
+			selectStmnt = selectStmnt.Where(sq.Eq{condition.Column: condition.Value})
+		case models.SQLWhereOperatorGreaterThan:
+			selectStmnt = selectStmnt.Where(sq.Gt{condition.Column: condition.Value})
+		case models.SQLWhereOperatorLessThan:
+			selectStmnt = selectStmnt.Where(sq.Lt{condition.Column: condition.Value})
+		case models.SQLWhereOperatorGreaterThanOrEquals:
+			selectStmnt = selectStmnt.Where(sq.GtOrEq{condition.Column: condition.Value})
+		case models.SQLWhereOperatorLessThanOrEquals:
+			selectStmnt = selectStmnt.Where(sq.LtOrEq{condition.Column: condition.Value})
+		case models.SQLWhereOperatorNotEquals:
+			selectStmnt = selectStmnt.Where(sq.NotEq{condition.Column: condition.Value})
+		case models.SQLWhereOperatorLike:
+			selectStmnt = selectStmnt.Where(sq.Like{condition.Column: condition.Value})
+		case models.SQLWhereOperatorNotLike:
+			selectStmnt = selectStmnt.Where(sq.NotLike{condition.Column: condition.Value})
+		case models.SQLWhereOperatorIn, models.SQLWhereOperatorNotIn:
+			// parse as json array of strings:
+			asList := []string{}
+			err := json.Unmarshal([]byte(condition.Value), &asList)
+			if err != nil {
+				return nil, fmt.Errorf("Value must be a json array of strings: %s", err)
+			}
+			placeHolders := []string{}
+			for _, _ = range asList {
+				placeHolders = append(placeHolders, "?")
+			}
+			operatorString := "IN"
+			if condition.Operator == models.SQLWhereOperatorNotIn {
+				operatorString = "NOT IN"
+			}
+			selectStmnt = selectStmnt.Where(fmt.Sprintf("%s %s (%s)", condition.Column, operatorString, strings.Join(placeHolders, ",")), asList)
+		case models.SQLWhereOperatorIsNull:
+			selectStmnt = selectStmnt.Where(sq.Eq{condition.Column: nil})
+		case models.SQLWhereOperatorIsNotNull:
+			selectStmnt = selectStmnt.Where(sq.NotEq{condition.Column: nil})
+		case models.SQLJsonPathEquals:
+			selectStmnt.Where(sq.Expr("json_extract(?, ?) = ?", condition.Column, condition.Extra, condition.Value))
+		default:
+			return nil, fmt.Errorf("unknown operator %s", condition.Operator)
+		}
+
+		rows, err := db.Queryx(selectStmnt.ToSql())
+		if err != nil {
+			return nil, utils.JoinErrors("failed to execute query", err)
+		}
+		fmt.Println(selectStmnt.ToSql())
+		defer rows.Close()
+		for rows.Next() {
+			mail, err := email.NewFromDBRecord(rows)
+			if err != nil {
+				return nil, utils.JoinErrors("failed to create email from db record", err)
+			}
+			emails = append(emails, mail)
+		}
+	}
+	return emails, nil
 }

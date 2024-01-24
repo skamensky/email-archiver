@@ -154,3 +154,9 @@ func DebugPrintln(message string) {
 	message = fmt.Sprintf("DEBUG: %s %s", callerInfo, message)
 	log.Println(message)
 }
+
+func PanicIfError(err error) {
+	if err != nil {
+		panic(err)
+	}
+}

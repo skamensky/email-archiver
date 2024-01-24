@@ -3,3 +3,6 @@ data.db
 debug.txt
 main
 .idea
+node_modules
+tmp
+tmp_air
