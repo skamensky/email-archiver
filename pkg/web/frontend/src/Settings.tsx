@@ -1,5 +1,8 @@
-import {getOptions, Options} from "./api";
+import {getOptions} from "./api";
+import {Options} from "./goGeneratedModels";
 import {useEffect, useState} from "react";
+import {toast} from "react-toastify";
+import {asError} from "./utils";
 
 export const Settings = () => {
 
@@ -10,7 +13,7 @@ export const Settings = () => {
             setOptions(options);
             setLastUpdateNSecondsAgo(0);
         }).catch((err) => {
-            console.error(err);
+            toast.error(asError(err).message);
         })
 
         // 30 seconds
@@ -20,6 +23,7 @@ export const Settings = () => {
                 setLastUpdateNSecondsAgo(0);
             }).catch((err) => {
                 console.error(err);
+                toast.error(asError(err).message);
             })
         }, 10000);
 

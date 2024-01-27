@@ -58,3 +58,10 @@ The following fields will be made available directly:
 `bcc_name_1`: `SampleBCC`
 `bcc_mailbox_1`: `samplebcc`
 `bcc_host_1`: `gmail.com`
+
+
+# TODO
+- Full text search
+- Sync emails from the frontend
+- Archive emails from the frontend
+- Gmail style archive for backend (it should just be moving the email to the archive folder)

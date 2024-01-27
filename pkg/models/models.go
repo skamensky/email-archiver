@@ -60,33 +60,7 @@ type AttachmentMetaData struct {
 	Disposition Disposition
 }
 
-type SQLWhereOperator string
-
-const (
-	SQLWhereOperatorEquals              SQLWhereOperator = "="
-	SQLWhereOperatorNotEquals           SQLWhereOperator = "!="
-	SQLWhereOperatorGreaterThan         SQLWhereOperator = ">"
-	SQLWhereOperatorLessThan            SQLWhereOperator = "<"
-	SQLWhereOperatorGreaterThanOrEquals SQLWhereOperator = ">="
-	SQLWhereOperatorLessThanOrEquals    SQLWhereOperator = "<="
-	SQLWhereOperatorLike                SQLWhereOperator = "LIKE"
-	SQLWhereOperatorNotLike             SQLWhereOperator = "NOT LIKE"
-	SQLWhereOperatorIn                  SQLWhereOperator = "IN"
-	SQLWhereOperatorNotIn               SQLWhereOperator = "NOT IN"
-	SQLWhereOperatorIsNull              SQLWhereOperator = "IS NULL"
-	SQLWhereOperatorIsNotNull           SQLWhereOperator = "IS NOT NULL"
-	SQLJsonPathEquals                   SQLWhereOperator = "JSON_PATH_EQUALS"
-)
-
-type SQLWhereCondition struct {
-	Column   string
-	Value    string
-	Operator SQLWhereOperator
-	Extra    string
-}
-
 type Email interface {
-	GetMailbox() string
 	GetParseWarning() string
 	GetParseError() string
 	GetOurID() string
@@ -173,12 +147,12 @@ type Client interface {
 type DB interface {
 	SetNextUID(mailbox Mailbox, nextUID uint32, uidValidity uint32) error
 	GetNextUID(Mailbox) (MailboxRecord, error)
-	AddToDB([]Email) error
+	AddEmails(mailbox string, emails []Email) error
 	AggregateFolders() error
 	UpdateLocalMailboxState(Mailbox, []uint32) error
 	GetMessagesPendingSync(Mailbox) ([]uint32, error)
 	SetMessagesToSynced(mailbox Mailbox, uids []uint32) error
-	GetEmails([]SQLWhereCondition) ([]Email, error)
+	GetEmails(string) ([]Email, error)
 	// todo: allow for options to be set and retrieved in DB in addition to env vars
 	//GetOptions() (Options, error)
 	//SetOptions(Options) error

@@ -6,3 +6,4 @@ main
 node_modules
 tmp
 tmp_air
+tmp*.*

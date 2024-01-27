@@ -3,13 +3,11 @@ package web
 import (
 	"embed"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"github.com/gorilla/websocket"
 	"github.com/skamensky/email-archiver/pkg/database"
 	"github.com/skamensky/email-archiver/pkg/email"
-	"github.com/skamensky/email-archiver/pkg/models"
 	"github.com/skamensky/email-archiver/pkg/options"
 	"github.com/skamensky/email-archiver/pkg/utils"
 	"io/fs"
@@ -21,8 +19,8 @@ import (
 	"time"
 )
 
-//go:embed static
-var staticDir embed.FS
+//go:embed frontend/build
+var frontendBuildDir embed.FS
 var addr = flag.String("addr", "localhost:8080", "http service address")
 var upgrader = websocket.Upgrader{}          // use default options
 var clients = make(map[*websocket.Conn]bool) // connected clients
@@ -64,6 +62,15 @@ func handleMessages() {
 
 func apiDec(handler func(http.ResponseWriter, *http.Request) (int, error)) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// "host:port" [METHOD] path?query"
+
+		path := r.URL.Path
+		if r.URL.RawQuery != "" {
+			path += "?" + r.URL.RawQuery
+		}
+		// get client ip:
+
+		utils.DebugPrintln(fmt.Sprintf("%s [%s] %s", r.RemoteAddr, r.Method, path))
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Content-Type", "application/json")
 
@@ -155,7 +162,7 @@ func getEmails(w http.ResponseWriter, r *http.Request) (int, error) {
 	// parse array of conditions from body:
 	// read json frombody:
 	type postBody struct {
-		Conditions []models.SQLWhereCondition `json:"conditions"`
+		SqlQuery string `json:"sqlQuery"`
 	}
 
 	type postResponse struct {
@@ -172,11 +179,16 @@ func getEmails(w http.ResponseWriter, r *http.Request) (int, error) {
 		return http.StatusBadRequest, utils.JoinErrors("error decoding json", err)
 	}
 
-	if len(body.Conditions) == 0 {
-		return http.StatusBadRequest, errors.New("no conditions provided")
+	if body.SqlQuery == "" {
+		return http.StatusBadRequest, utils.JoinErrors("sqlQuery is required", nil)
 	}
 
-	emailsInt, err := database.GetDatabase().GetEmails(body.Conditions)
+	emailsInt, err := database.GetDatabase().GetEmails(body.SqlQuery)
+
+	if err != nil {
+		return http.StatusInternalServerError, utils.JoinErrors("error getting emails", err)
+	}
+
 	emails := []*email.Email{}
 	for _, e := range emailsInt {
 		emails = append(emails, e.(*email.Email))
@@ -205,11 +217,12 @@ func Start() error {
 	go handleMessages()
 
 	go randomWriter()
-	content, err := fs.Sub(staticDir, "static")
+	content, err := fs.Sub(frontendBuildDir, "frontend/build")
 	if err != nil {
 		return utils.JoinErrors("failed to load static content", err)
 	}
 	http.Handle("/", http.FileServer(http.FS(content)))
+
 	fmt.Printf("Starting server at %s\n", *addr)
 	return http.ListenAndServe(*addr, nil)
 }

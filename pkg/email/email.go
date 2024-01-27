@@ -3,6 +3,7 @@ package email
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"github.com/jmoiron/sqlx"
 	"io"
@@ -39,7 +40,7 @@ type Email struct {
 	BccMailbox1     string                      `json:"bcc_mailbox_1,omitempty" db:"bcc_mailbox_1"`
 	BccHost1        string                      `json:"bcc_host_1,omitempty" db:"bcc_host_1"`
 	InReplyTo       string                      `json:"in_reply_to,omitempty" db:"in_reply_to"`
-	Mailbox         string                      `json:"mailbox,omitempty" db:"mailbox"`
+	Mailboxes       []string                    `json:"mailboxes,omitempty" db:"mailboxes"`
 	ParseWarning    string                      `json:"parse_warning,omitempty" db:"parse_warning"`
 	ParseError      string                      `json:"parse_error,omitempty" db:"parse_error"`
 	OurId           string                      `json:"our_id,omitempty" db:"our_id"`
@@ -62,10 +63,120 @@ func New(msg *imap.Message, client models.Client) models.Email {
 
 func NewFromDBRecord(rows *sqlx.Rows) (models.Email, error) {
 	emailWrap := &Email{}
-	err := rows.StructScan(emailWrap)
+
+	rowData := make(map[string]interface{})
+	err := rows.MapScan(rowData)
 	if err != nil {
-		return nil, err
+		return nil, utils.JoinErrors("error mapping row to email", err)
 	}
+
+	if !utils.IsInterfaceNil(rowData["message_id"]) {
+		emailWrap.MessageId = rowData["message_id"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["date"]) {
+		emailWrap.Date = rowData["date"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["subject"]) {
+		emailWrap.Subject = rowData["subject"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["from_name_1"]) {
+		emailWrap.FromName1 = rowData["from_name_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["from_mailbox_1"]) {
+		emailWrap.FromMailbox1 = rowData["from_mailbox_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["from_host_1"]) {
+		emailWrap.FromHost1 = rowData["from_host_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["sender_name_1"]) {
+		emailWrap.SenderName1 = rowData["sender_name_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["sender_mailbox_1"]) {
+		emailWrap.SenderMailbox1 = rowData["sender_mailbox_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["sender_host_1"]) {
+		emailWrap.SenderHost1 = rowData["sender_host_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["reply_to_name_1"]) {
+		emailWrap.ReplyToName1 = rowData["reply_to_name_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["reply_to_mailbox_1"]) {
+		emailWrap.ReplyToMailbox1 = rowData["reply_to_mailbox_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["reply_to_host_1"]) {
+		emailWrap.ReplyToHost1 = rowData["reply_to_host_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["to_name_1"]) {
+		emailWrap.ToName1 = rowData["to_name_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["to_mailbox_1"]) {
+		emailWrap.ToMailbox1 = rowData["to_mailbox_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["to_host_1"]) {
+		emailWrap.ToHost1 = rowData["to_host_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["cc_name_1"]) {
+		emailWrap.CcName1 = rowData["cc_name_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["cc_mailbox_1"]) {
+		emailWrap.CcMailbox1 = rowData["cc_mailbox_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["cc_host_1"]) {
+		emailWrap.CcHost1 = rowData["cc_host_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["bcc_name_1"]) {
+		emailWrap.BccName1 = rowData["bcc_name_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["bcc_mailbox_1"]) {
+		emailWrap.BccMailbox1 = rowData["bcc_mailbox_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["bcc_host_1"]) {
+		emailWrap.BccHost1 = rowData["bcc_host_1"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["in_reply_to"]) {
+		emailWrap.InReplyTo = rowData["in_reply_to"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["mailboxes"]) {
+		emailWrap.Mailboxes = strings.Split(rowData["mailboxes"].(string), ",")
+	}
+	if !utils.IsInterfaceNil(rowData["parse_warning"]) {
+		emailWrap.ParseWarning = rowData["parse_warning"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["parse_error"]) {
+		emailWrap.ParseError = rowData["parse_error"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["our_id"]) {
+		emailWrap.OurId = rowData["our_id"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["flags"]) {
+		emailWrap.Flags = strings.Split(rowData["flags"].(string), ",")
+	}
+	if !utils.IsInterfaceNil(rowData["uid"]) {
+		emailWrap.UID = rowData["uid"].(uint32)
+	}
+	if !utils.IsInterfaceNil(rowData["text_content"]) {
+		emailWrap.TextContent = rowData["text_content"].(string)
+	}
+	if !utils.IsInterfaceNil(rowData["html_content"]) {
+		emailWrap.HTMLContent = rowData["html_content"].(string)
+	}
+	emailWrap.Attachments = []models.AttachmentMetaData{}
+	emailWrap.Mailboxes = []string{}
+
+	if !utils.IsInterfaceNil(rowData["attachments"]) {
+		err = json.Unmarshal([]byte(rowData["attachments"].(string)), &emailWrap.Attachments)
+		if err != nil {
+			return nil, utils.JoinErrors("error unmarshalling attachments", err)
+		}
+	}
+
+	if !utils.IsInterfaceNil(rowData["mailboxes"]) {
+		err = json.Unmarshal([]byte(rowData["mailboxes"].(string)), &emailWrap.Mailboxes)
+		if err != nil {
+			return nil, utils.JoinErrors("error unmarshalling mailboxes", err)
+		}
+	}
+
 	return emailWrap, nil
 }
 
@@ -76,7 +187,6 @@ func (emailWrap *Email) parseMessage(msg *imap.Message) *Email {
 	email := &Email{
 		Flags:    msg.Flags,
 		Envelope: msg.Envelope,
-		Mailbox:  emailWrap.client.CurrentMailbox().Name(),
 	}
 
 	if !utils.IsInterfaceNil(email.Envelope) {
@@ -314,130 +424,126 @@ func (emailWrap *Email) parseMessage(msg *imap.Message) *Email {
 	return email
 }
 
-func (e *Email) GetMailbox() string {
-	return e.Mailbox
+func (emailWrap *Email) GetParseWarning() string {
+	return emailWrap.ParseWarning
 }
 
-func (e *Email) GetParseWarning() string {
-	return e.ParseWarning
+func (emailWrap *Email) GetParseError() string {
+	return emailWrap.ParseError
 }
 
-func (e *Email) GetParseError() string {
-	return e.ParseError
+func (emailWrap *Email) GetOurID() string {
+	return emailWrap.OurId
 }
 
-func (e *Email) GetOurID() string {
-	return e.OurId
+func (emailWrap *Email) GetEnvelope() *imap.Envelope {
+	return emailWrap.Envelope
 }
 
-func (e *Email) GetEnvelope() *imap.Envelope {
-	return e.Envelope
+func (emailWrap *Email) GetFlags() []string {
+	return emailWrap.Flags
 }
 
-func (e *Email) GetFlags() []string {
-	return e.Flags
+func (emailWrap *Email) GetUID() uint32 {
+	return emailWrap.UID
 }
 
-func (e *Email) GetUID() uint32 {
-	return e.UID
+func (emailWrap *Email) GetTextContent() string {
+	return emailWrap.TextContent
 }
 
-func (e *Email) GetTextContent() string {
-	return e.TextContent
+func (emailWrap *Email) GetHTMLContent() string {
+	return emailWrap.HTMLContent
 }
 
-func (e *Email) GetHTMLContent() string {
-	return e.HTMLContent
+func (emailWrap *Email) GetAttachments() []models.AttachmentMetaData {
+	return emailWrap.Attachments
 }
 
-func (e *Email) GetAttachments() []models.AttachmentMetaData {
-	return e.Attachments
+func (emailWrap *Email) GetMessageId() string {
+	return emailWrap.MessageId
 }
 
-func (e *Email) GetMessageId() string {
-	return e.MessageId
+func (emailWrap *Email) GetDate() string {
+	return emailWrap.Date
 }
 
-func (e *Email) GetDate() string {
-	return e.Date
+func (emailWrap *Email) GetSubject() string {
+	return emailWrap.Subject
 }
 
-func (e *Email) GetSubject() string {
-	return e.Subject
+func (emailWrap *Email) GetFromName1() string {
+	return emailWrap.FromName1
 }
 
-func (e *Email) GetFromName1() string {
-	return e.FromName1
+func (emailWrap *Email) GetFromMailbox1() string {
+	return emailWrap.FromMailbox1
 }
 
-func (e *Email) GetFromMailbox1() string {
-	return e.FromMailbox1
+func (emailWrap *Email) GetFromHost1() string {
+	return emailWrap.FromHost1
 }
 
-func (e *Email) GetFromHost1() string {
-	return e.FromHost1
+func (emailWrap *Email) GetSenderName1() string {
+	return emailWrap.SenderName1
 }
 
-func (e *Email) GetSenderName1() string {
-	return e.SenderName1
+func (emailWrap *Email) GetSenderMailbox1() string {
+	return emailWrap.SenderMailbox1
 }
 
-func (e *Email) GetSenderMailbox1() string {
-	return e.SenderMailbox1
+func (emailWrap *Email) GetSenderHost1() string {
+	return emailWrap.SenderHost1
 }
 
-func (e *Email) GetSenderHost1() string {
-	return e.SenderHost1
+func (emailWrap *Email) GetReplyToName1() string {
+	return emailWrap.ReplyToName1
 }
 
-func (e *Email) GetReplyToName1() string {
-	return e.ReplyToName1
+func (emailWrap *Email) GetReplyToMailbox1() string {
+	return emailWrap.ReplyToMailbox1
 }
 
-func (e *Email) GetReplyToMailbox1() string {
-	return e.ReplyToMailbox1
+func (emailWrap *Email) GetReplyToHost1() string {
+	return emailWrap.ReplyToHost1
 }
 
-func (e *Email) GetReplyToHost1() string {
-	return e.ReplyToHost1
+func (emailWrap *Email) GetToName1() string {
+	return emailWrap.ToName1
 }
 
-func (e *Email) GetToName1() string {
-	return e.ToName1
+func (emailWrap *Email) GetToMailbox1() string {
+	return emailWrap.ToMailbox1
 }
 
-func (e *Email) GetToMailbox1() string {
-	return e.ToMailbox1
+func (emailWrap *Email) GetToHost1() string {
+	return emailWrap.ToHost1
 }
 
-func (e *Email) GetToHost1() string {
-	return e.ToHost1
+func (emailWrap *Email) GetCcName1() string {
+	return emailWrap.CcName1
 }
 
-func (e *Email) GetCcName1() string {
-	return e.CcName1
+func (emailWrap *Email) GetCcMailbox1() string {
+	return emailWrap.CcMailbox1
 }
 
-func (e *Email) GetCcMailbox1() string {
-	return e.CcMailbox1
+func (emailWrap *Email) GetCcHost1() string {
+	return emailWrap.CcHost1
 }
 
-func (e *Email) GetCcHost1() string {
-	return e.CcHost1
+func (emailWrap *Email) GetBccName1() string {
+	return emailWrap.BccName1
 }
 
-func (e *Email) GetBccName1() string {
-	return e.BccName1
+func (emailWrap *Email) GetBccMailbox1() string {
+	return emailWrap.BccMailbox1
 }
 
-func (e *Email) GetBccMailbox1() string {
-	return e.BccMailbox1
+func (emailWrap *Email) GetBccHost1() string {
+	return emailWrap.BccHost1
 }
 
-func (e *Email) GetBccHost1() string {
-	return e.BccHost1
-}
-
-func (e *Email) GetInReplyTo() string {
-	return e.InReplyTo
+func (emailWrap *Email) GetInReplyTo() string {
+	return emailWrap.InReplyTo
 }

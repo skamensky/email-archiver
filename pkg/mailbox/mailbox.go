@@ -194,7 +194,7 @@ func (mailboxWrap *Mailbox) DownloadEmails() error {
 	}
 
 	utils.DebugPrintln("adding to db")
-	if err := database.GetDatabase().AddToDB(emails); err != nil {
+	if err := database.GetDatabase().AddEmails(mailboxWrap.Name(), emails); err != nil {
 		return utils.JoinErrors("failed to add to db", err)
 	}
 

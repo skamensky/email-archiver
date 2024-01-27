@@ -4,6 +4,8 @@ import { BrowserRouter as Router, Route, Link, Routes } from "react-router-dom";
 // import {Home} from "./Home";
 import {Settings} from "./Settings";
 import {EmailArchiver} from "./EmailArchiver";
+import { ToastContainer } from 'react-toastify';
+
 
 const LocalStateViewer = () => <div className="p-4">
     <h1 className="text-2xl"> Local State Viewer</h1>
@@ -30,6 +32,7 @@ function App() {
                     </Routes>
                 </div>
             </div>
+            <ToastContainer pauseOnFocusLoss={false} pauseOnHover={true} />
         </Router>
     );
 }

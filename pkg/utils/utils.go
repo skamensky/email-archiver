@@ -79,6 +79,9 @@ func MustJSON(i interface{}) string {
 }
 
 func IsInterfaceNil(i interface{}) bool {
+	if i == nil {
+		return true
+	}
 	return reflect.DeepEqual(i, reflect.Zero(reflect.TypeOf(i)).Interface())
 }
 
