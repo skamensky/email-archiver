@@ -5,16 +5,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/jmoiron/sqlx"
-	"io"
-	"log"
-	"strconv"
-	"strings"
-
 	"github.com/emersion/go-imap"
 	"github.com/emersion/go-message/mail"
+	"github.com/jmoiron/sqlx"
+	"github.com/k3a/html2text"
 	"github.com/skamensky/email-archiver/pkg/models"
 	"github.com/skamensky/email-archiver/pkg/utils"
+	"io"
+	"log"
+	"regexp"
+	"strconv"
+	"strings"
 )
 
 type Email struct {
@@ -66,6 +67,7 @@ func NewFromDBRecord(rows *sqlx.Rows) (models.Email, error) {
 
 	rowData := make(map[string]interface{})
 	err := rows.MapScan(rowData)
+
 	if err != nil {
 		return nil, utils.JoinErrors("error mapping row to email", err)
 	}
@@ -177,6 +179,11 @@ func NewFromDBRecord(rows *sqlx.Rows) (models.Email, error) {
 		}
 	}
 
+	colNames := []string{}
+	for k, _ := range rowData {
+		colNames = append(colNames, k)
+	}
+
 	return emailWrap, nil
 }
 
@@ -187,6 +194,7 @@ func (emailWrap *Email) parseMessage(msg *imap.Message) *Email {
 	email := &Email{
 		Flags:    msg.Flags,
 		Envelope: msg.Envelope,
+		UID:      msg.Uid,
 	}
 
 	if !utils.IsInterfaceNil(email.Envelope) {
@@ -262,7 +270,7 @@ func (emailWrap *Email) parseMessage(msg *imap.Message) *Email {
 
 	r := msg.GetBody(models.SectionToFetch)
 	if r == nil {
-		errorMsg := "Server didn't returned message body"
+		errorMsg := "Server didn't return a message body"
 		if emailWrap.client.Options().GetStrictMailParsing() {
 			log.Fatal(errorMsg)
 		} else {
@@ -420,6 +428,15 @@ func (emailWrap *Email) parseMessage(msg *imap.Message) *Email {
 			email.Attachments = append(email.Attachments, attachment)
 		}
 
+		reg, err := regexp.Compile("[^a-zA-Z0-9]+")
+		if err != nil {
+			log.Fatal(err)
+		}
+		textCleaned := reg.ReplaceAllString(email.TextContent, "")
+		// this is used for the search functionality. We don't search html, just text for the sake of simplicity
+		if textCleaned == "" && email.HTMLContent != "" {
+			email.TextContent = html2text.HTML2Text(email.HTMLContent)
+		}
 	}
 	return email
 }

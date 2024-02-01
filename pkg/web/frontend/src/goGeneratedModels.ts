@@ -1,6 +1,15 @@
 /* Do not change, this code is generated from Golang structs */
 
 
+export enum MailboxEventType {
+    MailboxSyncQueued = "MailboxSyncQueued",
+    MailboxDownloadStarted = "MailboxDownloadStarted",
+    MailboxDownloadCompleted = "MailboxDownloadCompleted",
+    MailboxDownloadSkipped = "MailboxDownloadSkipped",
+    MailboxDownloadError = "MailboxDownloadError",
+    MailboxDownloadProgress = "MailboxDownloadProgress",
+    MailboxSyncWarning = "MailboxSyncWarning",
+}
 export class Options {
     email?: string;
     password?: string;
@@ -134,7 +143,6 @@ export class Email {
     bcc_mailbox_1?: string;
     bcc_host_1?: string;
     in_reply_to?: string;
-    mailbox?: string;
     mailboxes?: string[];
     parse_warning?: string;
     parse_error?: string;
@@ -170,7 +178,6 @@ export class Email {
         this.bcc_mailbox_1 = source["bcc_mailbox_1"];
         this.bcc_host_1 = source["bcc_host_1"];
         this.in_reply_to = source["in_reply_to"];
-        this.mailbox = source["mailbox"];
         this.mailboxes = source["mailboxes"];
         this.parse_warning = source["parse_warning"];
         this.parse_error = source["parse_error"];
@@ -200,4 +207,36 @@ export class Email {
 	    }
 	    return a;
 	}
+}
+export class MailboxRecord {
+    name: string;
+    last_synced: number;
+    attributes: string[];
+    num_emails: number;
+
+    constructor(source: any = {}) {
+        if ('string' === typeof source) source = JSON.parse(source);
+        this.name = source["name"];
+        this.last_synced = source["last_synced"];
+        this.attributes = source["attributes"];
+        this.num_emails = source["num_emails"];
+    }
+}
+export class MailboxEvent {
+    Mailbox: string;
+    TotalToDownload: number;
+    TotalDownloaded: number;
+    Error: string;
+    Warning: string;
+    EventType: MailboxEventType;
+
+    constructor(source: any = {}) {
+        if ('string' === typeof source) source = JSON.parse(source);
+        this.Mailbox = source["Mailbox"];
+        this.TotalToDownload = source["TotalToDownload"];
+        this.TotalDownloaded = source["TotalDownloaded"];
+        this.Error = source["Error"];
+        this.Warning = source["Warning"];
+        this.EventType = source["EventType"];
+    }
 }

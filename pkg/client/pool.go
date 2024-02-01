@@ -12,32 +12,45 @@ import (
 )
 
 type ClientConnPool struct {
-	pool            chan models.Client
-	poolMap         map[int]models.Client
-	checkoutMut     sync.Mutex
-	mailboxCacheMut sync.Mutex
-	options         models.Options
-	statusesHandler func(models.MailboxEvent)
-	statuses        chan models.MailboxEvent
-	mailboxesCache  map[string]models.Mailbox
-	nextId          int
+	pool              chan models.Client
+	poolMap           map[int]models.Client
+	checkoutMut       sync.Mutex
+	mailboxCacheMut   sync.Mutex
+	hydrateMailboxMut sync.Mutex
+	options           models.Options
+	statusesHandler   func(*models.MailboxEvent)
+	statuses          chan models.MailboxEvent
+	mailboxesCache    map[string]models.Mailbox
+	nextId            int
 }
 
-func NewClientConnPool(options models.Options, statusHandler func(models.MailboxEvent)) models.ClientPool {
+func NewClientConnPool(options models.Options, statusHandler func(*models.MailboxEvent)) models.ClientPool {
 	pool := &ClientConnPool{
-		pool:           make(chan models.Client, options.GetMaxPoolSize()),
-		options:        options,
-		mailboxesCache: make(map[string]models.Mailbox),
-		statuses:       make(chan models.MailboxEvent),
-		nextId:         1,
-		poolMap:        make(map[int]models.Client),
+		pool:              make(chan models.Client, options.GetMaxPoolSize()),
+		options:           options,
+		mailboxesCache:    make(map[string]models.Mailbox),
+		hydrateMailboxMut: sync.Mutex{},
+		statuses:          make(chan models.MailboxEvent),
+		nextId:            1,
+		poolMap:           make(map[int]models.Client),
 	}
 	if statusHandler == nil {
-		pool.statusesHandler = func(event models.MailboxEvent) {}
+		pool.statusesHandler = func(event *models.MailboxEvent) {}
 	} else {
 		pool.statusesHandler = statusHandler
 	}
+
+	go func() {
+		for event := range pool.statuses {
+			pool.statusesHandler(&event)
+		}
+	}()
+
 	return pool
+}
+
+func (clientPool *ClientConnPool) SetEventHandler(handler func(*models.MailboxEvent)) {
+	clientPool.statusesHandler = handler
 }
 
 func (clientPool *ClientConnPool) Get() (models.Client, error) {
@@ -53,7 +66,7 @@ func (clientPool *ClientConnPool) Get() (models.Client, error) {
 			client.Logout()
 			delete(clientPool.poolMap, nextId)
 			var err error
-			client, err = newClient(clientPool.options, clientPool.statusesHandler, nextId, clientPool)
+			client, err = newClient(clientPool.options, nextId, clientPool)
 			clientPool.poolMap[nextId] = client
 			clientPool.nextId++
 			if err != nil {
@@ -65,13 +78,19 @@ func (clientPool *ClientConnPool) Get() (models.Client, error) {
 
 		// lazy create new connection if we haven't reached max pool size
 		if len(clientPool.poolMap) < clientPool.options.GetMaxPoolSize() {
-			defer clientPool.checkoutMut.Unlock()
-			client, err := newClient(clientPool.options, clientPool.statusesHandler, nextId, clientPool)
+
+			// we unlock before connecting so that other goroutines can create connections in parallel
+			// by setting the nextId to nil, we essentially up the counter so that our comparison to max pool size is
+			// always accurate
+			clientPool.poolMap[nextId] = nil
+			clientPool.nextId++
+			clientPool.checkoutMut.Unlock()
+
+			client, err := newClient(clientPool.options, nextId, clientPool)
 			if err != nil {
 				return nil, err
 			}
 			clientPool.poolMap[nextId] = client
-			clientPool.nextId++
 			utils.DebugPrintln(fmt.Sprintf("Created new connection. Total active connections: %d", len(clientPool.poolMap)))
 			return client, nil
 		}
@@ -120,10 +139,33 @@ func (clientPool *ClientConnPool) SetMailboxCache(mailbox models.Mailbox) {
 
 func (clientPool *ClientConnPool) ListMailboxes() ([]models.Mailbox, error) {
 	// TODO, allow for a configurable way of refreshing the mailbox cache
+	// every method call does a DB request but not necessarily an imap operation
+
+	clientPool.hydrateMailboxMut.Lock()
 	if clientPool.mailboxesCache == nil || len(clientPool.mailboxesCache) == 0 {
 		err := clientPool.HydrateMailboxCache()
 		if err != nil {
 			return nil, utils.JoinErrors("failed to hydrate mailbox cache", err)
+		}
+	}
+	clientPool.hydrateMailboxMut.Unlock()
+
+	mailboxRecords, err := database.GetDatabase().GetAllMailboxRecords()
+
+	if err != nil {
+		return nil, utils.JoinErrors("could not get mailbox record from DB", err)
+	}
+
+	nameToRecord := map[string]models.MailboxRecord{}
+	for _, record := range mailboxRecords {
+		nameToRecord[record.Name] = record
+	}
+
+	for name, mbox := range clientPool.mailboxesCache {
+		if record, ok := nameToRecord[name]; ok {
+			// updates last synced time
+			mbox.SetMailboxRecord(record)
+			clientPool.SetMailboxCache(mbox)
 		}
 	}
 
@@ -131,6 +173,7 @@ func (clientPool *ClientConnPool) ListMailboxes() ([]models.Mailbox, error) {
 	for _, mbox := range clientPool.mailboxesCache {
 		mboxes = append(mboxes, mbox)
 	}
+
 	return mboxes, nil
 }
 
@@ -157,6 +200,10 @@ func (clientPool *ClientConnPool) HydrateMailboxCache() error {
 
 	if err != nil {
 		return utils.JoinErrors("failed to list allMailboxes", err)
+	}
+
+	if err != nil {
+		return utils.JoinErrors("failed to list mailboxes from DB", err)
 	}
 
 	mailboxNameToInfo := map[string]*imap.MailboxInfo{}
@@ -195,6 +242,7 @@ func (clientPool *ClientConnPool) HydrateMailboxCache() error {
 			return utils.JoinErrors("failed to get mailbox status", err)
 		}
 		mbox := mailbox.New(res.status, mailboxNameToInfo[res.status.Name])
+
 		clientPool.SetMailboxCache(mbox)
 	}
 
@@ -202,13 +250,7 @@ func (clientPool *ClientConnPool) HydrateMailboxCache() error {
 
 }
 
-func (clientPool *ClientConnPool) SyncMailboxMessageStates() error {
-
-	utils.DebugPrintln("Syncing message states for all mailboxes")
-	mailboxes, err := clientPool.ListMailboxes()
-	if err != nil {
-		return utils.JoinErrors("failed to list mailboxes", err)
-	}
+func (clientPool *ClientConnPool) SyncMailboxMessageStates(mailboxes []models.Mailbox) error {
 	errChan := make(chan error, len(mailboxes))
 
 	for _, m := range mailboxes {
@@ -216,7 +258,7 @@ func (clientPool *ClientConnPool) SyncMailboxMessageStates() error {
 		go func(mbox models.Mailbox, pool *ClientConnPool, errChan chan error) {
 			client, err := pool.Get()
 			defer clientPool.Put(client)
-			utils.DebugPrintln("Syncing message states for mailbox: " + mbox.Name())
+			utils.DebugPrintln(fmt.Sprintf("[client_id=%v]", client.Id()), "Syncing message states for mailbox: "+mbox.Name())
 			if err != nil {
 				errChan <- utils.JoinErrors(fmt.Sprintf("failed to get client for mailbox %s", mbox.Name()), err)
 				return
@@ -246,13 +288,9 @@ func (clientPool *ClientConnPool) SyncMailboxMessageStates() error {
 	return nil
 }
 
-func (pool *ClientConnPool) DownloadAllMailboxes() error {
-	mailboxes, err := pool.ListMailboxes()
-	if err != nil {
-		return utils.JoinErrors("failed to list mailboxes", err)
-	}
+func (pool *ClientConnPool) DownloadMailboxes(sourceMailboxes []models.Mailbox) error {
 
-	err = pool.SyncMailboxMessageStates()
+	err := pool.SyncMailboxMessageStates(sourceMailboxes)
 	if err != nil {
 		return utils.JoinErrors("failed to sync mailbox message states", err)
 	}
@@ -268,11 +306,7 @@ func (pool *ClientConnPool) DownloadAllMailboxes() error {
 	allMailboxes := utils.NewSet([]string{})
 	unselectableMailboxes := utils.NewSet([]string{})
 
-	if err != nil {
-		return utils.JoinErrors("failed to list mailboxes", err)
-	}
-
-	for _, m := range mailboxes {
+	for _, m := range sourceMailboxes {
 		if m.HasAttribute("\\Noselect") {
 			unselectableMailboxes.Add(m.Name())
 		}
@@ -284,6 +318,14 @@ func (pool *ClientConnPool) DownloadAllMailboxes() error {
 		finalMailboxes = finalMailboxes.Intersection(limitToMailboxes)
 	}
 	finalMailboxes = finalMailboxes.Minus(skipMailboxes)
+
+	for _, m := range finalMailboxes.ToSlice() {
+		pool.Statuses() <- models.MailboxEvent{
+			Mailbox:   m,
+			EventType: models.MailboxSyncQueued,
+		}
+		utils.DebugPrintln("Queued mailbox for download: ", m)
+	}
 
 	resultChan := make(chan mailboxDownloadResult, len(finalMailboxes))
 
@@ -299,7 +341,15 @@ func (pool *ClientConnPool) DownloadAllMailboxes() error {
 			}
 			defer pool.Put(client)
 			mbox.SetClient(client)
-			utils.DebugPrintln(fmt.Sprintf("downloading mailbox %s", mbox.Name()))
+			err = client.Select(mbox.Name(), true)
+			if err != nil {
+				resultChan <- mailboxDownloadResult{
+					mbox: mbox,
+					err:  utils.JoinErrors("failed to select mailbox", err),
+				}
+				return
+			}
+			utils.DebugPrintln(fmt.Sprintf("[client_id=%v]", client.Id()), "downloading mailbox", mbox.Name())
 			err = mbox.DownloadEmails()
 			resultChan <- mailboxDownloadResult{
 				mbox: mbox,
@@ -318,11 +368,18 @@ func (pool *ClientConnPool) DownloadAllMailboxes() error {
 			}
 			return utils.JoinErrors("failed to download emails from inbox", result.err)
 		}
+
 	}
 
 	err = database.GetDatabase().AggregateFolders()
 	if err != nil {
 		return utils.JoinErrors("failed to aggregate folders", err)
 	}
+
+	err = database.GetDatabase().UpdateFTS()
+	if err != nil {
+		return utils.JoinErrors("failed to update full text search", err)
+	}
+
 	return nil
 }

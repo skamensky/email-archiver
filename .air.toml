@@ -5,7 +5,7 @@ tmp_dir = "tmp_air"
 [build]
   args_bin = []
   bin = "./tmp_air/main"
-  cmd = "go build  -o ./tmp_air/main cmd/main.go"
+  cmd = "go build --tags \"fts5\" -o ./tmp_air/main cmd/main.go"
   delay = 1000
   exclude_dir = ["assets", "tmp_air", "vendor", "testdata","pkg/web/frontend"]
   exclude_file = []

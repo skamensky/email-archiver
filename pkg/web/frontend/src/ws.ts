@@ -1,5 +1,7 @@
 const startWSConnection = () => {
-    const webServer = `ws://${window.location.hostname}:${window.location.port}/echo`;
+
+    // const webServer = `ws://${window.location.hostname}:${window.location.port}/ws`;
+    const webServer = `ws://localhost:8080/ws`;
     var ws = new WebSocket(webServer);
     ws.onopen = function () {
         ws.send("Hello, world");

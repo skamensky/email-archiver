@@ -2,13 +2,16 @@ package database
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"github.com/jmoiron/sqlx"
 	"github.com/skamensky/email-archiver/pkg/email"
 	"github.com/skamensky/email-archiver/pkg/models"
 	"github.com/skamensky/email-archiver/pkg/utils"
 	"os"
+	"strings"
 	"sync"
+	"time"
 )
 
 type DB struct {
@@ -18,12 +21,54 @@ type DB struct {
 var dATABASE *DB
 var mutex = &sync.Mutex{}
 
+var tableToColumns = map[string][]string{}
+
 func GetDatabase() models.DB {
 	if dATABASE != nil {
 		return dATABASE
 	} else {
 		panic("database not initialized")
 	}
+}
+
+// gets columns in order of definition
+func (dbWrap *DB) getTableColumns(tableName string) ([]string, error) {
+	if tableToColumns == nil {
+		tableToColumns = map[string][]string{}
+	}
+	//select name from pragma_table_info('tablName') order by cid
+
+	//check if we already have the columns
+	if columns, ok := tableToColumns[tableName]; ok {
+		return columns, nil
+	}
+
+	db, err := dbWrap.getDB()
+
+	if err != nil {
+		return nil, utils.JoinErrors("failed to open db", err)
+	}
+
+	rows, err := db.Query(fmt.Sprintf("select name from pragma_table_info('%v') order by cid", tableName))
+	if err != nil {
+		return nil, utils.JoinErrors("failed to get columns", err)
+	}
+	defer rows.Close()
+	columns := []string{}
+	for rows.Next() {
+		var name string
+		err = rows.Scan(&name)
+		if err != nil {
+			return nil, utils.JoinErrors("failed to scan column name", err)
+		}
+		columns = append(columns, name)
+	}
+	err = rows.Err()
+	if err != nil {
+		return nil, utils.JoinErrors("failed to get columns", err)
+	}
+	tableToColumns[tableName] = columns
+	return columns, nil
 }
 
 func New(options models.Options) (models.DB, error) {
@@ -45,6 +90,7 @@ func New(options models.Options) (models.DB, error) {
 
 func (dbWrap *DB) getDB() (*sqlx.DB, error) {
 	db, err := sqlx.Connect("sqlite3", dbWrap.options.GetDBPath())
+
 	if err != nil {
 		return nil, utils.JoinErrors("failed to open db", err)
 	}
@@ -54,9 +100,10 @@ func (dbWrap *DB) getDB() (*sqlx.DB, error) {
 func (dbWrap *DB) initDB() error {
 	_, err := os.Stat(dbWrap.options.GetDBPath())
 	if err == nil {
-		utils.DebugPrintln(fmt.Sprintf("%v already exists, skipping init\n", dbWrap.options.GetDBPath()))
 		return nil
 	}
+
+	utils.DebugPrintln("DB", dbWrap.options.GetDBPath(), "does not exist, initializing DB")
 
 	db, err := dbWrap.getDB()
 	if err != nil {
@@ -125,21 +172,37 @@ func (dbWrap *DB) initDB() error {
 	if err != nil {
 		return utils.JoinErrors("failed to drop table message_staging", err)
 	}
-	_, err = db.Exec("CREATE TABLE message_staging(uid int, primary key (uid))")
+	_, err = db.Exec("CREATE TABLE message_staging(uid int,mailbox_name text,primary key (mailbox_name, uid))")
 	if err != nil {
 		return utils.JoinErrors("failed to create message_staging table", err)
+	}
+
+	_, err = db.Exec("DROP TABLE IF EXISTS email_fts")
+	if err != nil {
+		return utils.JoinErrors("failed to drop table email_fts", err)
+	}
+
+	_, err = db.Exec("CREATE VIRTUAL TABLE email_fts USING fts5(our_id unindexed, text_content, subject, from_name_1, from_mailbox_1, from_host_1, content=email);")
+	if err != nil {
+		return utils.JoinErrors("failed to create email_fts table", err)
 	}
 
 	_, err = db.Exec("DROP TABLE IF EXISTS mailbox")
 	if err != nil {
 		return utils.JoinErrors("failed to drop table mailbox", err)
 	}
-	_, err = db.Exec("CREATE TABLE mailbox (name text primary key,uid_next int, uid_validity int)")
+
+	_, err = db.Exec("create table persisted_frontend_state (  state text, id text primary key default 'state_id' );")
+	if err != nil {
+		return utils.JoinErrors("failed to create persisted_frontend_state table", err)
+	}
+
+	_, err = db.Exec("CREATE TABLE mailbox (name text primary key,attributes text,last_synced int, num_emails int)")
 	return utils.JoinErrors("failed to create mailbox table", err)
 
 }
 
-func (dbWrap *DB) SetNextUID(mailbox models.Mailbox, nextUID uint32, uidValidity uint32) error {
+func (dbWrap *DB) SaveMailboxRecord(mailbox models.MailboxRecord) error {
 	mutex.Lock()
 	defer mutex.Unlock()
 	db, err := dbWrap.getDB()
@@ -148,11 +211,19 @@ func (dbWrap *DB) SetNextUID(mailbox models.Mailbox, nextUID uint32, uidValidity
 	}
 	defer db.Close()
 
-	_, err = db.Exec("INSERT INTO mailbox (name, uid_next,uid_validity) VALUES (?, ?, ? ) ON CONFLICT(name) DO UPDATE SET uid_next = ?, uid_validity = ?", mailbox.Name(), nextUID, uidValidity, nextUID, uidValidity)
-	return utils.JoinErrors("failed to set next uid", err)
+	// now utc:
+	now := time.Now().UTC().Unix()
+	attributesAsJson, err := json.Marshal(mailbox.Attributes)
+
+	if err != nil {
+		return utils.JoinErrors("failed to marshal attributes", err)
+	}
+
+	_, err = db.Exec("INSERT INTO mailbox (name,attributes,last_synced) VALUES (?, ?, ? ) ON CONFLICT(name) DO UPDATE SET attributes = ?, last_synced = ?", mailbox.Name, string(attributesAsJson), now, string(attributesAsJson), now)
+	return utils.JoinErrors("failed to insert mailbox record", err)
 }
 
-func (dbWrap *DB) GetNextUID(mailbox models.Mailbox) (models.MailboxRecord, error) {
+func (dbWrap *DB) GetMailboxRecord(mailbox models.Mailbox) (models.MailboxRecord, error) {
 	mutex.Lock()
 	defer mutex.Unlock()
 	db, err := dbWrap.getDB()
@@ -161,55 +232,86 @@ func (dbWrap *DB) GetNextUID(mailbox models.Mailbox) (models.MailboxRecord, erro
 	}
 	defer db.Close()
 
-	var uidNext uint32
-	var uidValidity uint32
-	err = db.QueryRow("SELECT uid_next, uid_validity FROM folder WHERE name = ?", mailbox.Name()).Scan(&uidNext, &uidValidity)
+	var lastSynced sql.NullInt64
+	var attributes sql.NullString
+
+	err = db.QueryRow("SELECT attributes,last_synced FROM folder WHERE name = ?", mailbox.Name()).Scan(&lastSynced, &attributes)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return models.MailboxRecord{}, nil
 		}
-		return models.MailboxRecord{}, utils.JoinErrors("failed to get next uid", err)
+		return models.MailboxRecord{}, utils.JoinErrors("failed to query mailbox record", err)
 	}
+
+	if !lastSynced.Valid {
+		lastSynced.Int64 = 0
+	}
+	attributesAsList := []string{}
+
+	if attributes.Valid {
+		err = json.Unmarshal([]byte(attributes.String), &attributesAsList)
+		if err != nil {
+			return models.MailboxRecord{}, utils.JoinErrors("failed to unmarshal attributes", err)
+		}
+	}
+
 	return models.MailboxRecord{
-		Name:        mailbox.Name(),
-		UIDValidity: uidValidity,
-		UIDNext:     uidNext,
+		Name:       mailbox.Name(),
+		Attributes: attributesAsList,
+		LastSynced: lastSynced.Int64,
 	}, nil
 }
 
-func (dbWrap *DB) SetMessagesToSynced(mailbox models.Mailbox, uids []uint32) error {
+func (dbWrap *DB) GetAllMailboxRecords() ([]models.MailboxRecord, error) {
 	mutex.Lock()
 	defer mutex.Unlock()
-
-	err := dbWrap.truncateStaging()
-	if err != nil {
-		return utils.JoinErrors("failed to truncate staging", err)
-	}
-	err = dbWrap.addStagingMessages(uids)
-	if err != nil {
-		return utils.JoinErrors("failed to add staging messages", err)
-	}
-
 	db, err := dbWrap.getDB()
 	if err != nil {
-		return utils.JoinErrors("failed to open db", err)
+		return nil, utils.JoinErrors("failed to open db", err)
 	}
 	defer db.Close()
 
-	_, err = db.Exec("DELETE FROM message_to_mailbox WHERE mailbox_name = ? AND uid in (SELECT uid FROM message_staging)", mailbox.Name())
+	rows, err := db.Query("SELECT name, attributes, last_synced,num_emails FROM mailbox")
 	if err != nil {
-		return utils.JoinErrors("failed to delete from message_to_mailbox", err)
+		return nil, utils.JoinErrors("failed to get all mailbox records", err)
 	}
 
-	err = dbWrap.truncateStaging()
-	if err != nil {
-		return utils.JoinErrors("failed to truncate staging", err)
-	}
+	defer rows.Close()
+	var records []models.MailboxRecord
+	for rows.Next() {
+		var name string
+		var attributes sql.NullString
+		var lastSynced sql.NullInt64
+		var numEmails sql.NullInt64
+		err = rows.Scan(&name, &attributes, &lastSynced, &numEmails)
+		if err != nil {
+			return nil, utils.JoinErrors("failed to scan mailbox record", err)
+		}
 
-	return nil
+		if !lastSynced.Valid {
+			lastSynced.Int64 = 0
+		}
+
+		attributesAsList := []string{}
+		if attributes.Valid {
+			err = json.Unmarshal([]byte(attributes.String), &attributesAsList)
+			if err != nil {
+				return nil, utils.JoinErrors("failed to unmarshal attributes", err)
+			}
+		}
+
+		records = append(records, models.MailboxRecord{
+			Name:       name,
+			Attributes: attributesAsList,
+			LastSynced: lastSynced.Int64,
+			NumEmails:  int(numEmails.Int64),
+		})
+	}
+	return records, nil
 }
 
 func (dbWrap *DB) AddEmails(mailbox string, emails []models.Email) error {
+
 	mutex.Lock()
 	defer mutex.Unlock()
 	db, err := dbWrap.getDB()
@@ -218,7 +320,7 @@ func (dbWrap *DB) AddEmails(mailbox string, emails []models.Email) error {
 	}
 	defer db.Close()
 
-	tx, err := db.Begin()
+	tx, err := db.Beginx()
 	if err != nil {
 		return utils.JoinErrors("failed to begin transaction", err)
 	}
@@ -235,9 +337,9 @@ func (dbWrap *DB) AddEmails(mailbox string, emails []models.Email) error {
 	defer insertEmailStmnt.Close()
 
 	insertFolderStmnt, err := tx.Prepare(`
-		INSERT INTO message_to_mailbox (mailbox_name, our_id, uid)
-		VALUES (?, ?, ?)
-		ON CONFLICT (mailbox_name, uid) DO NOTHING
+		INSERT INTO message_to_mailbox (mailbox_name, our_id, uid,pending_sync)
+		VALUES (?, ?, ?, 0)
+		ON CONFLICT (mailbox_name, uid) DO UPDATE SET our_id = excluded.our_id, pending_sync = 0
 	`)
 
 	if err != nil {
@@ -245,7 +347,7 @@ func (dbWrap *DB) AddEmails(mailbox string, emails []models.Email) error {
 	}
 
 	for _, mail := range emails {
-		_, err = insertEmailStmnt.Exec(mail.GetOurID(), mail.GetParseWarning(), mail.GetParseError(), utils.MustJSON(mail.GetEnvelope()), mail.GetFlags(), mail.GetTextContent(), mail.GetHTMLContent(), utils.MustJSON(mail.GetAttachments()), mail.GetMessageId(), mail.GetDate(), mail.GetSubject(), mail.GetFromName1(), mail.GetFromMailbox1(), mail.GetFromHost1(), mail.GetSenderName1(), mail.GetSenderMailbox1(), mail.GetSenderHost1(), mail.GetReplyToName1(), mail.GetReplyToMailbox1(), mail.GetReplyToHost1(), mail.GetToName1(), mail.GetToMailbox1(), mail.GetToHost1(), mail.GetCcName1(), mail.GetCcMailbox1(), mail.GetCcHost1(), mail.GetBccName1(), mail.GetBccMailbox1(), mail.GetBccHost1(), mail.GetInReplyTo())
+		_, err = insertEmailStmnt.Exec(mail.GetOurID(), mail.GetParseWarning(), mail.GetParseError(), utils.MustJSON(mail.GetEnvelope()), utils.MustJSON(mail.GetFlags()), mail.GetTextContent(), mail.GetHTMLContent(), utils.MustJSON(mail.GetAttachments()), mail.GetMessageId(), mail.GetDate(), mail.GetSubject(), mail.GetFromName1(), mail.GetFromMailbox1(), mail.GetFromHost1(), mail.GetSenderName1(), mail.GetSenderMailbox1(), mail.GetSenderHost1(), mail.GetReplyToName1(), mail.GetReplyToMailbox1(), mail.GetReplyToHost1(), mail.GetToName1(), mail.GetToMailbox1(), mail.GetToHost1(), mail.GetCcName1(), mail.GetCcMailbox1(), mail.GetCcHost1(), mail.GetBccName1(), mail.GetBccMailbox1(), mail.GetBccHost1(), mail.GetInReplyTo())
 		if err != nil {
 			return utils.JoinErrors("failed to insert email", err)
 		}
@@ -256,15 +358,32 @@ func (dbWrap *DB) AddEmails(mailbox string, emails []models.Email) error {
 	}
 
 	err = tx.Commit()
+
 	return utils.JoinErrors("failed to commit transaction", err)
 }
 
 func (dbWrap *DB) AggregateFolders() error {
+
+	// TODO add a column 'numberOfMessages' to the mailbox table and update it here.
+
 	mutex.Lock()
 	defer mutex.Unlock()
 	db, err := dbWrap.getDB()
 	if err != nil {
 		return utils.JoinErrors("failed to open db", err)
+	}
+
+	_, err = db.Exec(`
+		UPDATE mailbox
+		SET num_emails = (
+		SELECT COUNT(*)
+		FROM message_to_mailbox
+		WHERE message_to_mailbox.mailbox_name = mailbox.name
+		)
+	`)
+
+	if err != nil {
+		return utils.JoinErrors("failed to update mailbox table", err)
 	}
 
 	// update emails table, folders will be a json list of folders.
@@ -309,18 +428,44 @@ func (dbWrap *DB) GetMessagesPendingSync(mailbox models.Mailbox) ([]uint32, erro
 	return pendingUIDs, nil
 }
 
-func (dbWrap *DB) UpdateLocalMailboxState(mailbox models.Mailbox, newUids []uint32) error {
+// useful for debugging, let's keep it around.
+func (dbWrap *DB) debugPrintMessageToMailboxTable(mailboxName string, querier sqlx.Queryer) {
+	vals, err := querier.Query("SELECT uid,pending_sync FROM message_to_mailbox WHERE mailbox_name = ?", mailboxName)
+	if err != nil {
+		utils.PanicIfError(err)
+	}
+	type uidAndPendingSync struct {
+		Uid         uint32 `json:"uid"`
+		PendingSync int    `json:"pending_sync"`
+	}
+	idsInDB := []uidAndPendingSync{}
+	for vals.Next() {
+		var uid uint32
+		var pendingSync int
+		utils.PanicIfError(vals.Scan(&uid, &pendingSync))
+		idsInDB = append(idsInDB, uidAndPendingSync{Uid: uid, PendingSync: pendingSync})
+	}
+	utils.PanicIfError(vals.Close())
+	utils.DebugPrintln("idsInDB", utils.MustJSON(idsInDB))
+
+}
+
+func (dbWrap *DB) UpdateLocalMailboxState(mailbox models.Mailbox, allUids []uint32) error {
 	mutex.Lock()
 	defer mutex.Unlock()
-	err := dbWrap.RemoveOrphanedEmailsFromMailbox(mailbox, newUids)
+
+	err := dbWrap.RemoveOrphanedEmailsFromMailbox(mailbox, allUids)
 	if err != nil {
 		return utils.JoinErrors("failed to remove orphaned emails", err)
 	}
-	return dbWrap.AddMissingEmailsToMailbox(mailbox, newUids)
+
+	err = dbWrap.AddMissingEmailsToMailbox(mailbox, allUids)
+
+	return err
 }
 
 // caller must hold mutex
-func (dbWrap *DB) AddMissingEmailsToMailbox(mailbox models.Mailbox, newUids []uint32) error {
+func (dbWrap *DB) AddMissingEmailsToMailbox(mailbox models.Mailbox, allUids []uint32) error {
 	db, err := dbWrap.getDB()
 	if err != nil {
 		return utils.JoinErrors("failed to open db", err)
@@ -333,10 +478,10 @@ func (dbWrap *DB) AddMissingEmailsToMailbox(mailbox models.Mailbox, newUids []ui
 		return utils.JoinErrors("failed to begin transaction", err)
 	}
 
-	// if the email is already in the db, we don't need to add it again
+	// if the email is already in the db, we don't need to add it again, the last value of pending_sync will be preserved (usually 0)
 	insertStmt, err := tx.Prepare("INSERT INTO message_to_mailbox (mailbox_name, uid, pending_sync) VALUES (?, ?, 1) ON CONFLICT DO NOTHING ")
 
-	for _, uid := range newUids {
+	for _, uid := range allUids {
 		_, err = insertStmt.Exec(mailbox.Name(), uid)
 		if err != nil {
 			return utils.JoinErrors("failed to insert uid", err)
@@ -348,13 +493,13 @@ func (dbWrap *DB) AddMissingEmailsToMailbox(mailbox models.Mailbox, newUids []ui
 }
 
 // caller must lock mutex
-func (dbWrap *DB) RemoveOrphanedEmailsFromMailbox(mailbox models.Mailbox, newUids []uint32) error {
+func (dbWrap *DB) RemoveOrphanedEmailsFromMailbox(mailbox models.Mailbox, allUids []uint32) error {
 
-	err := dbWrap.truncateStaging()
+	err := dbWrap.clearStaging(mailbox)
 	if err != nil {
 		return utils.JoinErrors("failed to truncate staging events", err)
 	}
-	err = dbWrap.addStagingMessages(newUids)
+	err = dbWrap.addStagingMessages(allUids, mailbox)
 
 	if err != nil {
 		return utils.JoinErrors("failed to add mailbox message events", err)
@@ -366,23 +511,16 @@ func (dbWrap *DB) RemoveOrphanedEmailsFromMailbox(mailbox models.Mailbox, newUid
 	}
 	defer db.Close()
 
-	_, err = db.Exec("DELETE FROM message_to_mailbox WHERE mailbox_name = ? AND uid NOT IN (SELECT uid FROM message_staging)", mailbox.Name())
+	// after this runs, message_to_mailbox will not contain uids that are not in the mailbox.
+	_, err = db.Exec("DELETE FROM message_to_mailbox WHERE mailbox_name = ? AND uid NOT IN (SELECT uid FROM message_staging where mailbox_name = ?)", mailbox.Name(), mailbox.Name())
 	if err != nil {
 		return utils.JoinErrors("failed to remove orphaned emails using staging", err)
-	}
-	_, err = db.Exec("DELETE FROM message_to_mailbox WHERE mailbox_name = ? AND pending_sync = 1", mailbox.Name())
-	if err != nil {
-		return utils.JoinErrors("failed to remove orphaned emails pending syncs", err)
-	}
-	err = dbWrap.truncateStaging()
-	if err != nil {
-		return utils.JoinErrors("failed to truncate staging events", err)
 	}
 	return nil
 }
 
 // caller must hold mutex
-func (dbWrap *DB) addStagingMessages(uids []uint32) error {
+func (dbWrap *DB) addStagingMessages(uids []uint32, mailbox models.Mailbox) error {
 	db, err := dbWrap.getDB()
 	if err != nil {
 		return utils.JoinErrors("failed to open db", err)
@@ -396,10 +534,10 @@ func (dbWrap *DB) addStagingMessages(uids []uint32) error {
 	}
 
 	// if the email is already in the db, we don't need to add it again
-	insertStmt, err := tx.Prepare("INSERT INTO message_staging (uid) VALUES (?) ON CONFLICT DO NOTHING ")
+	insertStmt, err := tx.Prepare("INSERT INTO message_staging (uid,mailbox_name) VALUES (?,?) ON CONFLICT DO NOTHING ")
 
 	for _, uid := range uids {
-		_, err = insertStmt.Exec(uid)
+		_, err = insertStmt.Exec(uid, mailbox.Name())
 		if err != nil {
 			return utils.JoinErrors("failed to insert uid", err)
 		}
@@ -412,16 +550,16 @@ func (dbWrap *DB) addStagingMessages(uids []uint32) error {
 	return nil
 }
 
-func (dbWrap *DB) truncateStaging() error {
+func (dbWrap *DB) clearStaging(mailbox models.Mailbox) error {
 	db, err := dbWrap.getDB()
 	if err != nil {
 		return utils.JoinErrors("failed to open db", err)
 	}
-	_, err = db.Exec("DELETE FROM message_staging")
+	_, err = db.Exec("DELETE FROM message_staging WHERE mailbox_name = ?", mailbox.Name())
 	return utils.JoinErrors("failed to truncate message_staging", err)
 }
 
-func (dbWrap *DB) GetEmails(sqlQuery string) ([]models.Email, error) {
+func (dbWrap *DB) GetEmails(sqlQuery string, params ...interface{}) ([]models.Email, error) {
 	db, err := dbWrap.getDB()
 	if err != nil {
 		return nil, utils.JoinErrors("failed to open db", err)
@@ -430,11 +568,13 @@ func (dbWrap *DB) GetEmails(sqlQuery string) ([]models.Email, error) {
 	utils.DebugPrintln(fmt.Sprintf("executing query: %s", sqlQuery))
 	emails := []models.Email{}
 
-	rows, err := db.Queryx(sqlQuery)
+	rows, err := db.Queryx(sqlQuery, params...)
+
 	if err != nil {
 		return nil, utils.JoinErrors("failed to execute query", err)
 	}
 	defer rows.Close()
+
 	for rows.Next() {
 		mail, err := email.NewFromDBRecord(rows)
 		if err != nil {
@@ -444,4 +584,102 @@ func (dbWrap *DB) GetEmails(sqlQuery string) ([]models.Email, error) {
 		emails = append(emails, mail)
 	}
 	return emails, nil
+}
+
+func (dbWrap *DB) FullTextSearch(searchTerm string) ([]models.Email, error) {
+	allEmailColumns, err := dbWrap.getTableColumns("email")
+	if err != nil {
+		return nil, utils.JoinErrors("failed to get email table columns", err)
+	}
+
+	searchFieldsInOrder, err := dbWrap.getTableColumns("email_fts")
+	if err != nil {
+		return nil, utils.JoinErrors("failed to get email_fts table columns", err)
+	}
+
+	emailColumnsToSelect := utils.NewSet(allEmailColumns).Minus(utils.NewSet(searchFieldsInOrder)).ToSlice()
+	emailColumnsToSelectEmaiLPrepended := []string{}
+	for _, col := range emailColumnsToSelect {
+		emailColumnsToSelectEmaiLPrepended = append(emailColumnsToSelectEmaiLPrepended, fmt.Sprintf("email.%s AS %s", col, col))
+	}
+
+	emailFtsColumns := []string{"email_fts.our_id as our_id"}
+	for index, col := range searchFieldsInOrder[1:] {
+		// the reason we are generating this is because I was already hit by a bug from misnumbering the columns
+
+		//highlight(email_fts, 1, '<span class="bg-yellow-200 text-black">', '</span>') as text_content,
+		emailFtsColumns = append(emailFtsColumns, fmt.Sprintf(`highlight(email_fts, %d, '<span class="bg-yellow-200 text-black">', '</span>') as %s`, index+1, col))
+	}
+
+	// the goal of this sql sqlQuery is to match select * from email but filter on matched results using full text search
+	// and replace the matched fields with highlighted versions
+	sqlQuery := fmt.Sprintf(`
+		SELECT
+			%s
+		FROM email_fts
+		JOIN email ON email.our_id = email_fts.our_id
+		WHERE email_fts MATCH ?
+		`, strings.Join(append(emailFtsColumns, emailColumnsToSelectEmaiLPrepended...), ",\n\t\t\t"))
+
+	return dbWrap.GetEmails(sqlQuery, searchTerm)
+}
+
+func (dbWrap *DB) UpdateFTS() error {
+	db, err := dbWrap.getDB()
+	if err != nil {
+		return utils.JoinErrors("failed to open db", err)
+	}
+
+	// the reason we drop and recreate the table is because whenever I tried deleting I got '[SQLITE_CORRUPT_VTAB] Content in the virtual table is corrupt (database disk image is malformed)
+
+	_, err = db.Exec("DROP TABLE IF EXISTS email_fts")
+	if err != nil {
+		return utils.JoinErrors("failed to drop email_fts", err)
+	}
+
+	_, err = db.Exec("CREATE VIRTUAL TABLE email_fts USING fts5(our_id unindexed, text_content, subject, from_name_1, from_mailbox_1, from_host_1, content=email)")
+
+	if err != nil {
+		return utils.JoinErrors("failed to recreate email_fts", err)
+	}
+
+	_, err = db.Exec("INSERT INTO email_fts(our_id,text_content, subject, from_name_1, from_mailbox_1, from_host_1) SELECT our_id,text_content, subject, from_name_1, from_mailbox_1, from_host_1 FROM email")
+	if err != nil {
+		return utils.JoinErrors("failed to insert into email_fts", err)
+	}
+
+	return nil
+}
+func (dbWrap *DB) GetFrontendState() (string, error) {
+	db, err := dbWrap.getDB()
+	if err != nil {
+		return "", utils.JoinErrors("failed to open db", err)
+	}
+	defer db.Close()
+
+	var frontendState string
+
+	err = db.QueryRow("SELECT state FROM persisted_frontend_state").Scan(&frontendState)
+
+	if err != nil {
+		return "", utils.JoinErrors("failed to get frontend state", err)
+	}
+
+	return frontendState, nil
+}
+
+func (dbWrap *DB) SetFrontendState(state string) error {
+	db, err := dbWrap.getDB()
+	if err != nil {
+		return utils.JoinErrors("failed to open db", err)
+	}
+
+	_, err = db.Exec("INSERT INTO persisted_frontend_state(state,id) VALUES(?,'state_id') ON CONFLICT(id) DO UPDATE SET state = ?", state, state)
+
+	if err != nil {
+		return utils.JoinErrors("failed to set frontend state", err)
+	}
+
+	defer db.Close()
+	return nil
 }

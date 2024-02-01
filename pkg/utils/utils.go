@@ -140,7 +140,7 @@ func ReverseArray[T any](array []T) []T {
 	return array
 }
 
-func DebugPrintln(message string) {
+func DebugPrintln(messages ...interface{}) {
 	// check if DEBUG is in the environment and its true:
 	debug, ok := os.LookupEnv(models.DEBUG_ENVIRONMENT_KEY)
 	if !ok {
@@ -154,7 +154,13 @@ func DebugPrintln(message string) {
 	}
 
 	callerInfo := getRuntimeCallerInfoAsString()
-	message = fmt.Sprintf("DEBUG: %s %s", callerInfo, message)
+
+	messageWithParams := []string{}
+	for _, param := range messages {
+		messageWithParams = append(messageWithParams, fmt.Sprintf("%v", param))
+	}
+
+	message := fmt.Sprintf("DEBUG: %s %s", callerInfo, strings.Join(messageWithParams, " "))
 	log.Println(message)
 }
 

@@ -16,7 +16,7 @@ import (
 	"os"
 )
 
-func setup() (models.ClientPool, error) {
+func setup(imapEventHandler func(event *models.MailboxEvent)) (models.ClientPool, error) {
 
 	err := godotenv.Load()
 	if err != nil {
@@ -28,7 +28,7 @@ func setup() (models.ClientPool, error) {
 		return nil, utils.JoinErrors("failed to setup options", err)
 	}
 
-	pool := client.NewClientConnPool(ops, nil)
+	pool := client.NewClientConnPool(ops, imapEventHandler)
 
 	// make sure we can get a client
 	lClient, err := pool.Get()
@@ -57,7 +57,7 @@ func main() {
 				Aliases: []string{"l"},
 				Usage:   "list mailboxes",
 				Action: func(*cli.Context) error {
-					pool, err := setup()
+					pool, err := setup(nil)
 					if err != nil {
 						return err
 					}
@@ -78,12 +78,16 @@ func main() {
 				Aliases: []string{"d"},
 				Usage:   "download all mailboxes to a local db",
 				Action: func(cCtx *cli.Context) error {
-					imapClient, err := setup()
+					imapClient, err := setup(nil)
 					if err != nil {
 						return err
 					}
 					defer imapClient.Close()
-					return imapClient.DownloadAllMailboxes()
+					mailboxes, err := imapClient.ListMailboxes()
+					if err != nil {
+						return utils.JoinErrors("failed to list mailboxes", err)
+					}
+					return imapClient.DownloadMailboxes(mailboxes)
 				},
 			},
 			{
@@ -91,11 +95,11 @@ func main() {
 				Aliases: []string{"s"},
 				Usage:   "serve the web ui",
 				Action: func(cCtx *cli.Context) error {
-					_, err := setup()
+					pool, err := setup(web.ImapEventHandler)
 					if err != nil {
 						return err
 					}
-					return web.Start()
+					return web.Start(pool)
 				},
 			},
 		},

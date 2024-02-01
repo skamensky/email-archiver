@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"github.com/emersion/go-imap"
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/schollz/progressbar/v3"
 	"github.com/skamensky/email-archiver/pkg/database"
 	"github.com/skamensky/email-archiver/pkg/email"
 	"github.com/skamensky/email-archiver/pkg/models"
@@ -21,19 +20,20 @@ const (
 )
 
 type Mailbox struct {
-	client      models.Client
-	name        string
-	uidValidity uint32
-	uidNext     uint32
-	attributes  utils.Set[string]
+	client        models.Client
+	name          string
+	mailboxRecord models.MailboxRecord
+	attributes    utils.Set[string]
 }
 
 func New(mailboxStatus *imap.MailboxStatus, mailboxInfo *imap.MailboxInfo) models.Mailbox {
 	return &Mailbox{
-		name:        mailboxStatus.Name,
-		uidValidity: mailboxStatus.UidValidity,
-		uidNext:     mailboxStatus.UidNext,
-		attributes:  utils.NewSet(mailboxInfo.Attributes),
+		name: mailboxStatus.Name,
+		mailboxRecord: models.MailboxRecord{
+			Name:       mailboxStatus.Name,
+			Attributes: mailboxInfo.Attributes,
+		},
+		attributes: utils.NewSet(mailboxInfo.Attributes),
 	}
 }
 
@@ -42,12 +42,7 @@ func (mailboxWrap *Mailbox) HasAttribute(attribute string) bool {
 }
 
 func (mailboxWrap *Mailbox) MailboxRecord() models.MailboxRecord {
-
-	return models.MailboxRecord{
-		Name:        mailboxWrap.name,
-		UIDValidity: mailboxWrap.uidValidity,
-		UIDNext:     mailboxWrap.uidNext,
-	}
+	return mailboxWrap.mailboxRecord
 }
 
 func (mailboxWrap *Mailbox) SetClient(client models.Client) {
@@ -55,8 +50,7 @@ func (mailboxWrap *Mailbox) SetClient(client models.Client) {
 }
 
 func (mailboxWrap *Mailbox) SetMailboxRecord(mailboxRecord models.MailboxRecord) {
-	mailboxWrap.uidValidity = mailboxRecord.UIDValidity
-	mailboxWrap.uidNext = mailboxRecord.UIDNext
+	mailboxWrap.mailboxRecord = mailboxRecord
 }
 
 func (mailboxWrap *Mailbox) Client() models.Client {
@@ -67,22 +61,18 @@ func (mailboxWrap *Mailbox) Name() string {
 	return mailboxWrap.name
 }
 
-func (mailboxWrap *Mailbox) SyncUidValidity() error {
-	// TODO: implement
-	return nil
-}
-
 /*
 assumes correct mailbox is selected
 */
 func (mailboxWrap *Mailbox) SyncToLocalState() error {
 
-	uidsRemote, err := mailboxWrap.Client().ListAllUids(mailboxWrap)
+	allUids, err := mailboxWrap.Client().ListAllUids(mailboxWrap)
+
 	if err != nil {
 		return utils.JoinErrors("could not list all uids", err)
 	}
 	db := database.GetDatabase()
-	return utils.JoinErrors("could not sync to local state", db.UpdateLocalMailboxState(mailboxWrap, uidsRemote))
+	return utils.JoinErrors("could not sync to local state", db.UpdateLocalMailboxState(mailboxWrap, allUids))
 
 }
 
@@ -91,8 +81,17 @@ func (mailboxWrap *Mailbox) addMailboxEvent(eventType models.MailboxEvent) {
 	mailboxWrap.Client().Statuses() <- eventType
 }
 
+// mailbox should be selected
+// relies on the mailbox being synced to local state
+// caller should have already run:
+// mailboxWrap.SyncToLocalState()
 func (mailboxWrap *Mailbox) DownloadEmails() error {
-	// relies on the mailbox being synced to local state
+
+	// sanity check that the correct mailbox is selected.
+	//This is the result of a nasty bug which cause downloading emails and associating them with the wrong mailbox
+	if mailboxWrap.Client().CurrentMailbox().Name() != mailboxWrap.Name() {
+		return fmt.Errorf("Attempted to download emails from mailbox %s, but mailbox %s is selected", mailboxWrap.Name(), mailboxWrap.Client().CurrentMailbox().Name())
+	}
 
 	mailboxWrap.addMailboxEvent(
 		models.MailboxEvent{
@@ -100,13 +99,6 @@ func (mailboxWrap *Mailbox) DownloadEmails() error {
 		})
 
 	doneChan := make(chan error, 1)
-	utils.DebugPrintln("syncing to local state")
-	err := mailboxWrap.SyncToLocalState()
-	if err != nil {
-		return utils.JoinErrors("could not sync to local state", err)
-	}
-
-	utils.DebugPrintln("getting messages pending sync")
 	uidsToFetch, err := database.GetDatabase().GetMessagesPendingSync(mailboxWrap)
 
 	if err != nil {
@@ -120,18 +112,15 @@ func (mailboxWrap *Mailbox) DownloadEmails() error {
 				TotalDownloaded: 0,
 				TotalToDownload: 0,
 			})
-		return nil
+		// mark as synced
+		err = database.GetDatabase().SaveMailboxRecord(mailboxWrap.mailboxRecord)
+		return utils.JoinErrors("failed to set next uid", err)
 	}
 
 	emails := []models.Email{}
 	messages := make(chan *imap.Message)
 
-	utils.DebugPrintln("fetching messages")
 	go func() {
-		seqset := new(imap.SeqSet)
-		// NOTE: we used to use uidValidity+nextUID. But relying on the uidValidity does not get us moved emails and I've seen other issues with it being unreliable
-		// so we just fetch all messages and then compare to what we have locally
-		seqset.AddNum(uidsToFetch...)
 
 		items := []imap.FetchItem{
 			models.SectionToFetch.FetchItem(),
@@ -139,28 +128,21 @@ func (mailboxWrap *Mailbox) DownloadEmails() error {
 			imap.FetchFlags,
 			imap.FetchUid,
 		}
-		doneChan <- mailboxWrap.Client().Fetch(seqset, items, messages)
+		// NOTE: we used to use uidValidity+nextUID. But relying on the uidValidity does not get us moved emails and I've seen other issues with it being unreliable
+		// so we just fetch all messages and then compare to what we have locally
+		doneChan <- mailboxWrap.Client().UidFetch(uidsToFetch, items, messages)
+
 	}()
 
-	utils.DebugPrintln("parsing messages")
-	mailboxWrap.addMailboxEvent(
-		models.MailboxEvent{
-			EventType:       models.MailboxDownloadStarted,
-			TotalToDownload: len(uidsToFetch),
-		})
-
-	fmt.Println()
-
-	bar := progressbar.Default(int64(len(uidsToFetch)), "Downloading emails from "+mailboxWrap.Name()+" mailbox")
 	messagesProcessed := 0
 	for msg := range messages {
 		messagesProcessed++
-		bar.Add(1)
 
 		mailboxWrap.addMailboxEvent(
 			models.MailboxEvent{
 				EventType:       models.MailboxDownloadProgress,
 				TotalDownloaded: messagesProcessed,
+				TotalToDownload: len(uidsToFetch),
 			})
 
 		emailParsed := email.New(msg, mailboxWrap.Client())
@@ -187,21 +169,25 @@ func (mailboxWrap *Mailbox) DownloadEmails() error {
 	if err := <-doneChan; err != nil {
 		return utils.JoinErrors("failed to fetch", err)
 	}
-
-	err = database.GetDatabase().SetNextUID(mailboxWrap, mailboxWrap.uidNext, mailboxWrap.uidValidity)
-	if err != nil {
-		return utils.JoinErrors("failed to set next uid", err)
-	}
-
-	utils.DebugPrintln("adding to db")
 	if err := database.GetDatabase().AddEmails(mailboxWrap.Name(), emails); err != nil {
 		return utils.JoinErrors("failed to add to db", err)
 	}
 
-	utils.DebugPrintln("setting messages to synced in db")
-	err = database.GetDatabase().SetMessagesToSynced(mailboxWrap, uidsToFetch)
+	err = database.GetDatabase().SaveMailboxRecord(mailboxWrap.mailboxRecord)
 	if err != nil {
-		return utils.JoinErrors("failed to set messages to synced", err)
+		return utils.JoinErrors("failed to set next uid", err)
+	}
+
+	if messagesProcessed < len(uidsToFetch) {
+		// I haven't gotten to the bottom of why this happens.
+		mailboxWrap.addMailboxEvent(
+			models.MailboxEvent{
+				EventType:       models.MailboxSyncWarning,
+				Warning:         fmt.Sprintf("tried to fetch %d messages but only got %d", len(uidsToFetch), messagesProcessed),
+				TotalDownloaded: messagesProcessed,
+				TotalToDownload: len(uidsToFetch),
+			},
+		)
 	}
 
 	mailboxWrap.addMailboxEvent(

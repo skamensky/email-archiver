@@ -1,0 +1,100 @@
+name: Build for release
+
+on:
+  push:
+    tags:
+        - 'v*' # on release of a new version
+jobs:
+
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+  build-frontend:
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: '1.18' # Specify your Go version here
+
+      - name: Install Mage
+        run: go install github.com/magefile/mage@latest
+
+      - name: Install Yarn
+        run: npm install --global yarn
+
+      - name: Build React Frontend
+        run: mage buildReactFrontend
+
+      - name: Upload React Build Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: react-build
+          path: pkg/web/frontend/build
+
+  build-backend:
+    needs: build-frontend
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [darwin, linux, windows]
+        goarch: [amd64,arm64]
+        exclude:
+          - goos: windows
+            goarch: arm64
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v3
+        with:
+          go-version: '1.18' # Specify your Go version here
+
+      - name: Install Mage
+        run: go install github.com/magefile/mage@latest
+
+      - name: Download React Build Artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: react-build
+          path: pkg/web/frontend/build
+
+      - name: Build Go Backend
+        run: mage buildGoBackend
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+
+      - name: Identify Built Binary
+        id: find_binary
+        run: |
+          FILE=$(ls ./build | grep 'email-archiver')
+          echo "BINARY_PATH=./build/$FILE" >> $GITHUB_ENV
+          echo "BINARY_NAME=$FILE" >> $GITHUB_ENV
+
+      - name: Upload Go Binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BINARY_PATH: ${{ env.BINARY_PATH }}
+          BINARY_NAME: ${{ env.BINARY_NAME }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ env.BINARY_PATH }}
+          asset_name: ${{ env.BINARY_NAME }}
+          asset_content_type: application/octet-stream

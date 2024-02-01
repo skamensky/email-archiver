@@ -10,6 +10,7 @@ import (
 	"github.com/skamensky/email-archiver/pkg/models"
 	"github.com/skamensky/email-archiver/pkg/utils"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 )
@@ -22,7 +23,7 @@ type Client struct {
 	id             int
 }
 
-func newClient(ops models.Options, statusesHandler func(models.MailboxEvent), id int, clientPool *ClientConnPool) (*Client, error) {
+func newClient(ops models.Options, id int, clientPool *ClientConnPool) (*Client, error) {
 	// from wiki: The imap.CharsetReader variable can be set by end users to parse charsets other than us-ascii and utf-8.
 	// For instance, go-message's charset.Reader (which supports all common encodings) can be used:
 	imap.CharsetReader = charset.Reader
@@ -31,12 +32,6 @@ func newClient(ops models.Options, statusesHandler func(models.MailboxEvent), id
 		id:     id,
 		parent: clientPool,
 	}
-
-	go func() {
-		for status := range clientWrapper.parent.Statuses() {
-			statusesHandler(status)
-		}
-	}()
 
 	imapClient, err := goImapClient.DialTLS(ops.GetImapServer(), &tls.Config{})
 
@@ -49,7 +44,15 @@ func newClient(ops models.Options, statusesHandler func(models.MailboxEvent), id
 	utils.DebugPrintln(fmt.Sprintf("client %d: connected to imap server", id))
 
 	if ops.GetImapClientDebug() {
-		debugFile := "debug_" + strconv.Itoa(id) + ".log"
+		debugDir := "imap_debug"
+		if _, err := os.Stat(debugDir); os.IsNotExist(err) {
+			err = os.Mkdir(debugDir, 0755)
+			if err != nil {
+				return nil, utils.JoinErrors("failed to create debug dir", err)
+			}
+		}
+
+		debugFile := filepath.Join(debugDir, "client_"+strconv.Itoa(id)+".log")
 		debugFileHandle, err := os.OpenFile(debugFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 		err = utils.JoinErrors("unable to truncate debug file", os.Truncate(debugFile, 0))
 		if err != nil {
@@ -134,14 +137,10 @@ func (clientWrap *Client) Select(mailboxName string, readOnly bool) error {
 		}
 	}
 	mbox = clientWrap.parent.mailboxesCache[mailboxName]
-	status, err := clientWrap.Client.Select(mailboxName, readOnly)
+	_, err := clientWrap.Client.Select(mailboxName, readOnly)
 	if err != nil {
 		return utils.JoinErrors(fmt.Sprintf("could not select mailbox %v", mailboxName), err)
 	}
-	mbox.SetMailboxRecord(models.MailboxRecord{
-		UIDNext:     status.UidNext,
-		UIDValidity: status.UidValidity,
-	})
 	clientWrap.currentMailbox = mbox
 	clientWrap.lastPing = time.Now()
 	return nil
@@ -168,8 +167,10 @@ func (clientWrap *Client) Options() models.Options {
 	return clientWrap.parent.options
 }
 
-func (clientWrap *Client) Fetch(seqset *imap.SeqSet, items []imap.FetchItem, ch chan *imap.Message) error {
-	err := clientWrap.Client.Fetch(seqset, items, ch)
+func (clientWrap *Client) UidFetch(uids []uint32, items []imap.FetchItem, ch chan *imap.Message) error {
+	seqset := new(imap.SeqSet)
+	seqset.AddNum(uids...)
+	err := clientWrap.Client.UidFetch(seqset, items, ch)
 	if err != nil {
 		return utils.JoinErrors("failed to fetch", err)
 	}

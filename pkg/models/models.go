@@ -15,21 +15,38 @@ const (
 )
 
 type MailboxRecord struct {
-	Name        string
-	UIDValidity uint32
-	UIDNext     uint32
+	Name       string   `json:"name"`
+	LastSynced int64    `json:"last_synced"`
+	Attributes []string `json:"attributes"`
+	NumEmails  int      `json:"num_emails"`
 }
 
-type MailboxEventType int
+type MailboxEventType string
+
+func (m MailboxEventType) TSName() string {
+	return string(m)
+}
 
 const (
-	MailboxDownloadStarted MailboxEventType = iota
-	MailboxDownloadCompleted
-	MailboxDownloadSkipped
-	MailboxDownloadError
-	MailboxDownloadProgress
-	MailboxSyncWarning
+	MailboxSyncQueued        MailboxEventType = "MailboxSyncQueued"
+	MailboxDownloadStarted   MailboxEventType = "MailboxDownloadStarted"
+	MailboxDownloadCompleted MailboxEventType = "MailboxDownloadCompleted"
+	MailboxDownloadSkipped   MailboxEventType = "MailboxDownloadSkipped"
+	MailboxDownloadError     MailboxEventType = "MailboxDownloadError"
+	MailboxDownloadProgress  MailboxEventType = "MailboxDownloadProgress"
+	MailboxSyncWarning       MailboxEventType = "MailboxSyncWarning"
 )
+
+// unfortunately, this is needed for typescriptify. We must manually update this list to stay in sync with MailboxEventType
+var AllEventTypes = []MailboxEventType{
+	MailboxSyncQueued,
+	MailboxDownloadStarted,
+	MailboxDownloadCompleted,
+	MailboxDownloadSkipped,
+	MailboxDownloadError,
+	MailboxDownloadProgress,
+	MailboxSyncWarning,
+}
 
 // used by both email.go and mailbox.go, which led to a circular dependency.
 // TODO: find a better place for this
@@ -95,7 +112,6 @@ type Email interface {
 }
 
 type Mailbox interface {
-	SyncUidValidity() error
 	DownloadEmails() error
 	Name() string
 	Client() Client
@@ -123,9 +139,10 @@ type ClientPool interface {
 	Get() (Client, error)
 	Put(Client)
 	ListMailboxes() ([]Mailbox, error)
-	DownloadAllMailboxes() error
-	SyncMailboxMessageStates() error
+	DownloadMailboxes([]Mailbox) error
+	SyncMailboxMessageStates([]Mailbox) error
 	Close()
+	SetEventHandler(func(*MailboxEvent))
 }
 
 type Client interface {
@@ -133,7 +150,7 @@ type Client interface {
 	Statuses() chan<- MailboxEvent
 	CurrentMailbox() Mailbox
 	Options() Options
-	Fetch(*imap.SeqSet, []imap.FetchItem, chan *imap.Message) error
+	UidFetch([]uint32, []imap.FetchItem, chan *imap.Message) error
 	ListAllUids(Mailbox) ([]uint32, error)
 	ListMailboxInfos() ([]*imap.MailboxInfo, error)
 	CopyToMailbox(fromMailbox Mailbox, toMailbox Mailbox, uids []uint32) error
@@ -141,19 +158,25 @@ type Client interface {
 	DownloadMailbox(Mailbox) error
 	LastPing() time.Time
 	RawSelect(mailboxName string, readOnly bool) (*imap.MailboxStatus, error)
+	Select(mailboxName string, readOnly bool) error
 	Id() int
 }
 
 type DB interface {
-	SetNextUID(mailbox Mailbox, nextUID uint32, uidValidity uint32) error
-	GetNextUID(Mailbox) (MailboxRecord, error)
+	SaveMailboxRecord(MailboxRecord) error
+	GetAllMailboxRecords() ([]MailboxRecord, error)
 	AddEmails(mailbox string, emails []Email) error
 	AggregateFolders() error
 	UpdateLocalMailboxState(Mailbox, []uint32) error
 	GetMessagesPendingSync(Mailbox) ([]uint32, error)
-	SetMessagesToSynced(mailbox Mailbox, uids []uint32) error
-	GetEmails(string) ([]Email, error)
+	GetEmails(sqlQuery string, params ...interface{}) ([]Email, error)
+	UpdateFTS() error
+	FullTextSearch(string) ([]Email, error)
+	SetFrontendState(string) error
+	GetFrontendState() (string, error)
 	// todo: allow for options to be set and retrieved in DB in addition to env vars
 	//GetOptions() (Options, error)
 	//SetOptions(Options) error
+
+	// todo: allow for saving and loading queries
 }
